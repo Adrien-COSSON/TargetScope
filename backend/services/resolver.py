@@ -1,7 +1,7 @@
 # backend\services\resolver.py
 
 # Import libraries
-from utils.logger import logger
+from backend.utils.logger import logger
 import requests
 from backend.schemas.target import Provenance, Target
 import datetime
@@ -34,7 +34,7 @@ def resolve_target(query: str) -> Target:
         raise ValueError(f"No results found for query: '{query}'")
     else:
         hit = hits[0]
-         
+        logger.info(f"resolve_target succeeded: {hit['symbol']} (Entrez: {hit.get('entrezgene')})")
         return Target(input_query = query,
                   gene_symbol = hit['symbol'],
                   name = hit['name'],
