@@ -20,6 +20,7 @@ class EvidenceItem(BaseModel):
 class Target(BaseModel):
     input_query: str    # the query of the user
     gene_symbol: str    # like "EGFR"
+    name: str   # like "Epidermal growth factor receptor"
     uniprot_id: Optional[str] = None    # like "P00533"
     entrez_id: Optional[int] = None     # like 1956
     ensembl_id: Optional[str] = None    # like "ENSG00000146648"

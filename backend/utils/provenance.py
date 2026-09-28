@@ -2,8 +2,8 @@
 
 # Import libraries
 from datetime import datetime
-from schemas.target import Provenance
-from utils.logger import logger
+from backend.schemas.target import Provenance
+from backend.utils.logger import logger
 
 def make_provenance(source: str, source_id: str = None, 
                     confidence: str = "medium", url: str = None

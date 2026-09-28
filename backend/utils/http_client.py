@@ -1,7 +1,7 @@
 # backend\utils\http_client.py
 
 # Import libraries
-from utils.logger import logger
+from backend.utils.logger import logger
 import httpx
 
 # APIs URLs

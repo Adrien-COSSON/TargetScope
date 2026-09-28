@@ -1,22 +1,22 @@
 # backend\main.py
 
 # Import libraries
-from utils.logger import logger
+from backend.utils.logger import logger
 import uvicorn
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from utils.http_client import get_client, close_client
-from routers.biology import router as biology_router
-from routers.clinical import router as clinical_router
-from routers.evidence import router as evidence_router
-from routers.expression import router as expression_router
-from routers.genetics import router as genetics_router
-from routers.patents import router as patents_router
-from routers.pharmacology import router as pharmacology_router
-from routers.preclinical import router as preclinical_router
-from routers.publications import router as publications_router
-from routers.synthesis import router as synthesis_router
-from routers.target import router as target_router
+from backend.utils.http_client import get_client, close_client
+from backend.routers.biology import router as biology_router
+from backend.routers.clinical import router as clinical_router
+from backend.routers.evidence import router as evidence_router
+from backend.routers.expression import router as expression_router
+from backend.routers.genetics import router as genetics_router
+from backend.routers.patents import router as patents_router
+from backend.routers.pharmacology import router as pharmacology_router
+from backend.routers.preclinical import router as preclinical_router
+from backend.routers.publications import router as publications_router
+from backend.routers.synthesis import router as synthesis_router
+from backend.routers.target import router as target_router
 
 
 # 1. lifespan défini en premier

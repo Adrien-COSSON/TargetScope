@@ -1,7 +1,7 @@
 # backend\utils\alias_query.py
 
 # Import libraries
-from schemas.target import Target
+from backend.schemas.target import Target
 
 AMBIGUOUS_ALIASES = {"p53", "met", "akt", "erk", "ras"} # to be complet
 

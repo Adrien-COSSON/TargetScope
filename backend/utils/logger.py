@@ -4,7 +4,7 @@
 import logging
 import logging.handlers
 from pathlib import Path
-from config import settings
+from backend.config import settings
 
 def setup_logging(log_dir: str = "logs") -> logging.Logger:
     """Loggin configuration for the whole project."""

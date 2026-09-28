@@ -8,7 +8,8 @@ from pathlib import Path
 class Settings(BaseSettings):
     anthropic_api_key: str
     pubmed_api_key: Optional[str] = None
-    log_level: Optional[str] = "INFO" 
+    log_level: Optional[str] = "INFO"
+    env: Optional[str] = "development"
     
     class Config:
         env_file = Path(__file__).parent.parent / ".env"
