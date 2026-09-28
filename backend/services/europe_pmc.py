@@ -32,16 +32,20 @@ def publication_timeline(gene_name: str) -> dict[str, int]:
     start_year = 1990
     
     for year in range(start_year, date.today().year + 1):
-        params = {"query": f"{gene_name} AND PUB_YEAR:{year}",
-                "resultType": "lite",
-                "pageSize": 1,
-                "format": "json"}
-        response = requests.get(url, params=params, timeout=30.0)
-        response.raise_for_status()
-        time.sleep(0.3)
+        try:
+            params = {"query": f"{gene_name} AND PUB_YEAR:{year}",
+                    "resultType": "lite",
+                    "pageSize": 1,
+                    "format": "json"}
+            response = requests.get(url, params=params, timeout=30.0)
+            response.raise_for_status()
+            time.sleep(0.3)
 
-        data = response.json()
-        hit_count = data.get("hitCount", 0)
-        pub_count_year[str(year)] = hit_count
+            data = response.json()
+            hit_count = data.get("hitCount", 0)
+            pub_count_year[str(year)] = hit_count
+        
+        except requests.exceptions.RequestException as e:
+            logger.warning("EuropePMC: erreur pour %s année %d: %s", gene_name, year, e)
 
     return dict(sorted(pub_count_year.items()))
