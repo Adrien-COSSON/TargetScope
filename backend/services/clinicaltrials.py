@@ -4,7 +4,6 @@
 import logging
 import requests
 import time
-from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +11,7 @@ REQUEST_TIMEOUT = 10  # seconds
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0  # seconds
 
-def fetch_trials(gene_name: str, page_size: int = 10) -> dict:
+def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
     """
     Fetch the most recent clinical trials from ClinicalTrials.gov
     for a given gene or protein name.
@@ -25,12 +24,15 @@ def fetch_trials(gene_name: str, page_size: int = 10) -> dict:
         list[dict]: List of dicts with keys nct_id, brief_title,
             overall_status, start_date, phases, conditions,
             brief_summary, link. Empty list on failure.
-
-    Raises:
-        requests.exceptions.RequestException: If all MAX_RETRIES attempts fail.
     """
     base_url = "https://clinicaltrials.gov/api/v2/studies"
-    params = {"query.term": gene_name, "pageSize": page_size, "format": "json"}
+    params = {"query.term": gene_name,
+              "query.intr": gene_name,
+              "pageSize": page_size, 
+              "format": "json", 
+              "fields": "NCTId,BriefTitle,OverallStatus,StartDate,Phase,Condition,BriefSummary"}
+    
+    logger.info("ClinicalTrials: fetch_trials started for '%s'", gene_name)
     
     for attempt in range(1, MAX_RETRIES +1):
         try:
@@ -61,6 +63,8 @@ def fetch_trials(gene_name: str, page_size: int = 10) -> dict:
 
                 link = f"https://clinicaltrials.gov/study/{nct_id}"
                 
+            
+                
                 trials.append({'nct_id': nct_id,
                                'brief_title': brief_title,
                                'overall_status': overall_status,
@@ -69,13 +73,17 @@ def fetch_trials(gene_name: str, page_size: int = 10) -> dict:
                                'conditions': conditions,
                                'brief_summary': brief_summary,
                                'link': link})
+                
+            logger.info("ClinicalTrials: fetch_trials ended — %d trials collected for '%s'", len(trials), gene_name)
+            
             return trials
         
         except requests.exceptions.RequestException as e:
-            logger.warning("ClinicalTrials: erreur tentative %d/%d pour '%s': %s", attempt, MAX_RETRIES, gene_name, e)
+            logger.warning("ClinicalTrials: attempt error %d/%d for '%s': %s", attempt, MAX_RETRIES, gene_name, e)
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_BACKOFF * attempt)
             else:
+                logger.error("ClinicalTrials: definitive failure after %d attempts for '%s'", MAX_RETRIES, gene_name)
                 return []
 
 
@@ -91,12 +99,10 @@ def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, int]:
     Returns:
         dict[str, int]: Dict mapping year to trial count, sorted in ascending order.
             Empty dict on failure.
-
-    Raises:
-        requests.exceptions.RequestException: If all MAX_RETRIES attempts fail.
     """    
     base_url = "https://clinicaltrials.gov/api/v2/studies"
-    params = {"query.term": gene_name, "pageSize": page_size, "format": "json"}
+    params = {"query.term": gene_name, "pageSize": page_size, "format": "json", "fields": "StartDate"}
+    logger.info("ClinicalTrials: trials_timeline started for '%s'", gene_name)
     
     for attempt in range(1, MAX_RETRIES +1):
         try:
@@ -124,11 +130,15 @@ def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, int]:
             if not trials_years:
                 logger.warning("ClinicalTrials: no trials found for '%s'", gene_name)
                     
+            logger.info("ClinicalTrials: trials_timeline ended — %d years, %d trials collected for '%s'",
+                        len(trials_years), sum(trials_years.values()), gene_name)
+                    
             return dict(sorted(trials_years.items()))
             
         except requests.exceptions.RequestException as e:
-            logger.warning("ClinicalTrials: erreur tentative %d/%d pour '%s': %s", attempt, MAX_RETRIES, gene_name, e)
+            logger.warning("ClinicalTrials: attempt error %d/%d for '%s': %s", attempt, MAX_RETRIES, gene_name, e)
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_BACKOFF * attempt)
             else:
+                logger.error("ClinicalTrials: definitive failure after %d attempts for '%s'", MAX_RETRIES, gene_name)
                 return {}
