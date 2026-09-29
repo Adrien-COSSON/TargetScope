@@ -1,11 +1,13 @@
 # backend\routers\resolver.py
 
 # Import libraries
-from backend.utils.logger import logger
+import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from backend.schemas.target import Target
 from backend.services.resolver import resolve_target
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 

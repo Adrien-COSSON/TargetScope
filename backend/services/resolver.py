@@ -1,11 +1,12 @@
 # backend\services\resolver.py
 
 # Import libraries
-from backend.utils.logger import logger
+import logging
 import requests
 from backend.schemas.target import Provenance, Target
 import datetime
 
+logger = logging.getLogger(__name__)
 
 def resolve_target(query: str) -> Target:
     """Resolve a gene/protein query to a canonical Target object via MyGene.info.

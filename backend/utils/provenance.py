@@ -1,9 +1,11 @@
 # backend\utils\provenance.py
 
 # Import libraries
+import logging
 from datetime import datetime
 from backend.schemas.target import Provenance
-from backend.utils.logger import logger
+
+logger = logging.getLogger(__name__)
 
 def make_provenance(source: str, source_id: str = None, 
                     confidence: str = "medium", url: str = None
