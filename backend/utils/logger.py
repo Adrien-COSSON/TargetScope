@@ -6,10 +6,15 @@ import logging.handlers
 from pathlib import Path
 from backend.config import settings
 
-def setup_logging(log_dir: str = "logs") -> logging.Logger:
-    """Loggin configuration for the whole project."""
+
+def setup_logging(log_dir: str = "logs") -> None:
+    """Logging configuration for the whole project.
+
+    Call once at application startup (main.py or FastAPI lifespan).
+    All modules then use logging.getLogger(__name__) directly.
+    """
     Path(log_dir).mkdir(exist_ok=True)
-    
+
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
 
     # Detailed format for files, concise for the console
@@ -24,13 +29,13 @@ def setup_logging(log_dir: str = "logs") -> logging.Logger:
 
     # Handler 1 : console
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)          # tout passe, le root filtre
+    console_handler.setLevel(logging.DEBUG)  # root filtre, handlers laissent tout passer
     console_handler.setFormatter(console_formatter)
 
     # Handler 2 : file with rotation (max 5 Mo × 3 files)
     file_handler = logging.handlers.RotatingFileHandler(
         filename=f"{log_dir}/app.log",
-        maxBytes=5 * 1024 * 1024,    # 5 Mo
+        maxBytes=5 * 1024 * 1024,  # 5 Mo
         backupCount=3,
         encoding="utf-8",
     )
@@ -42,12 +47,3 @@ def setup_logging(log_dir: str = "logs") -> logging.Logger:
     root_logger.setLevel(level)
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
-    
-    return logging.getLogger("targetscope")
-
-logger = setup_logging()
-
-if __name__ == "__main__":
-    setup_logging(log_dir="logs")
-    logger = logging.getLogger(__name__)
-    logger.info("Pipeline démarré")
