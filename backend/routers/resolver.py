@@ -2,8 +2,10 @@
 
 # Import libraries
 import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
 from backend.schemas.target import Target
 from backend.services.resolver import resolve_target
 
@@ -11,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
 class ResolverRequests(BaseModel):
     query: str
+
 
 @router.post("/resolve", response_model=Target)
 def resolve(request: ResolverRequests):
