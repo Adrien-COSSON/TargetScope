@@ -1,17 +1,15 @@
 # backend/services/clinicaltrials.py
 
 # Import libraries
+import asyncio
 import logging
-import requests
-import time
+from backend.utils.http_client import CLINICALTRIALS_BASE_URL, get_json
 
 logger = logging.getLogger(__name__)
 
-REQUEST_TIMEOUT = 10  # seconds
-MAX_RETRIES = 3
-RETRY_BACKOFF = 2.0  # seconds
+MAX_PAGES = 20  # safety cap on timeline pagination
 
-def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
+async def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
     """
     Fetch the most recent clinical trials from ClinicalTrials.gov
     for a given gene or protein name.
@@ -24,70 +22,59 @@ def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
         list[dict]: List of dicts with keys nct_id, brief_title,
             overall_status, start_date, phases, conditions,
             brief_summary, link. Empty list on failure.
-    """
-    base_url = "https://clinicaltrials.gov/api/v2/studies"
-    params = {"query.term": gene_name,
-              "query.intr": gene_name,
-              "pageSize": page_size, 
-              "format": "json", 
-              "fields": "NCTId,BriefTitle,OverallStatus,StartDate,Phase,Condition,BriefSummary"}
-    
+    """   
     logger.info("ClinicalTrials: fetch_trials started for '%s'", gene_name)
     
-    for attempt in range(1, MAX_RETRIES +1):
-        try:
-            response_trials = requests.get(base_url, params=params, timeout=REQUEST_TIMEOUT)
+    params = {"query.term": gene_name,
+              "query.intr": gene_name,
+              "pageSize": page_size,
+              "format": "json",
+              "fields": "NCTId,BriefTitle,OverallStatus,StartDate,Phase,Condition,BriefSummary"}
+    
+    raw = await get_json(f"{CLINICALTRIALS_BASE_URL}/studies", params=params, source="ClinicalTrials")
+    
+    if raw is None: 
+        return []
             
-            response_trials.raise_for_status()
-            raw = response_trials.json()
-            
-            trials = []
+    trials = []
 
-            for study in raw.get('studies', []):
-                protocol = study.get("protocolSection", {})
+    for study in raw.get('studies', []):
+        protocol = study.get("protocolSection", {})
 
-                identification = protocol.get("identificationModule", {})
-                nct_id = identification.get("nctId", "")
-                brief_title = identification.get("briefTitle", "")
+        identification = protocol.get("identificationModule", {})
+        nct_id = identification.get("nctId", "")
+        brief_title = identification.get("briefTitle", "")
 
-                status = protocol.get("statusModule", {})
-                overall_status = status.get("overallStatus", "")
-                start_date = status.get("startDateStruct", {}).get("date", "")
+        status = protocol.get("statusModule", {})
+        overall_status = status.get("overallStatus", "")
+        start_date = status.get("startDateStruct", {}).get("date", "")
 
-                design = protocol.get("designModule", {})
-                phases = design.get("phases", [])
+        design = protocol.get("designModule", {})
+        phases = design.get("phases", [])
 
-                conditions = protocol.get("conditionsModule", {}).get("conditions", [])
+        conditions = protocol.get("conditionsModule", {}).get("conditions", [])
 
-                brief_summary = protocol.get("descriptionModule", {}).get("briefSummary", "")
+        brief_summary = protocol.get("descriptionModule", {}).get("briefSummary", "")
 
-                link = f"https://clinicaltrials.gov/study/{nct_id}"
+        link = f"https://clinicaltrials.gov/study/{nct_id}"
                 
             
                 
-                trials.append({'nct_id': nct_id,
-                               'brief_title': brief_title,
-                               'overall_status': overall_status,
-                               'start_date': start_date,
-                               'phases': phases,
-                               'conditions': conditions,
-                               'brief_summary': brief_summary,
-                               'link': link})
+        trials.append({'nct_id': nct_id,
+                       'brief_title': brief_title,
+                       'overall_status': overall_status,
+                       'start_date': start_date,
+                       'phases': phases,
+                       'conditions': conditions,
+                       'brief_summary': brief_summary,
+                       'link': link})
                 
-            logger.info("ClinicalTrials: fetch_trials ended — %d trials collected for '%s'", len(trials), gene_name)
+    logger.info("ClinicalTrials: fetch_trials ended — %d trials collected for '%s'", len(trials), gene_name)
             
-            return trials
-        
-        except requests.exceptions.RequestException as e:
-            logger.warning("ClinicalTrials: attempt error %d/%d for '%s': %s", attempt, MAX_RETRIES, gene_name, e)
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt)
-            else:
-                logger.error("ClinicalTrials: definitive failure after %d attempts for '%s'", MAX_RETRIES, gene_name)
-                return []
+    return trials
 
 
-def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, int]:
+async def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, int]:
     """
     Fetch the number of clinical trials per year from ClinicalTrials.gov
     for a given gene or protein name, paginating through all results.
@@ -100,45 +87,41 @@ def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, int]:
         dict[str, int]: Dict mapping year to trial count, sorted in ascending order.
             Empty dict on failure.
     """    
-    base_url = "https://clinicaltrials.gov/api/v2/studies"
-    params = {"query.term": gene_name, "pageSize": page_size, "format": "json", "fields": "StartDate"}
     logger.info("ClinicalTrials: trials_timeline started for '%s'", gene_name)
     
-    for attempt in range(1, MAX_RETRIES +1):
-        try:
-            trials_years = {}
-            while True:
-                response_timeline = requests.get(base_url, params=params, timeout=REQUEST_TIMEOUT)
-            
-                response_timeline.raise_for_status()
-                time.sleep(0.5)
-                raw = response_timeline.json()
+    params = {"query.term": gene_name,
+              "query.intr": gene_name, 
+              "pageSize": page_size, 
+              "format": "json", 
+              "fields": "StartDate"}
 
-                for study in raw.get("studies", []):
-                    protocol = study.get("protocolSection", {})
-                    start_date = protocol.get("statusModule", {}).get("startDateStruct", {}).get("date", "")
-                    year = start_date[:4]
-                    if year.isdigit():
-                        trials_years[year] = trials_years.get(year, 0) + 1
-                    
-                next_token = raw.get("nextPageToken")
-                if next_token:
-                    params["pageToken"] = next_token
-                else:
-                    break
-                
-            if not trials_years:
-                logger.warning("ClinicalTrials: no trials found for '%s'", gene_name)
-                    
-            logger.info("ClinicalTrials: trials_timeline ended — %d years, %d trials collected for '%s'",
-                        len(trials_years), sum(trials_years.values()), gene_name)
-                    
-            return dict(sorted(trials_years.items()))
+    trials_years = {}
+    
+    for page in range(MAX_PAGES):
+        raw = await get_json(f"{CLINICALTRIALS_BASE_URL}/studies", params=params, source="ClinicalTrials")
+        if raw is None:
+            logger.error("ClinicalTrials: page %d failed for '%s', timeline discarded", page + 1, gene_name)
+            return {}
+
+        for study in raw.get("studies", []):
+            protocol = study.get("protocolSection", {})
+            start_date = protocol.get("statusModule", {}).get("startDateStruct", {}).get("date", "")
+            year = start_date[:4]
+            if year.isdigit():
+                trials_years[year] = trials_years.get(year, 0) + 1
             
-        except requests.exceptions.RequestException as e:
-            logger.warning("ClinicalTrials: attempt error %d/%d for '%s': %s", attempt, MAX_RETRIES, gene_name, e)
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt)
-            else:
-                logger.error("ClinicalTrials: definitive failure after %d attempts for '%s'", MAX_RETRIES, gene_name)
-                return {}
+        next_token = raw.get("nextPageToken")
+        if not next_token:
+            break
+        params["pageToken"] = next_token
+        await asyncio.sleep(0.5)
+    else:
+        logger.warning("ClinicalTrials: MAX_PAGES reached for '%s', timeline truncated", gene_name)
+        
+    if not trials_years:
+        logger.warning("ClinicalTrials: no trials found for '%s'", gene_name)
+
+    logger.info("ClinicalTrials: trials_timeline ended — %d years, %d trials collected for '%s'",
+                len(trials_years), sum(trials_years.values()), gene_name)
+
+    return dict(sorted(trials_years.items()))
