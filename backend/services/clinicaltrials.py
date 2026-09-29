@@ -3,11 +3,13 @@
 # Import libraries
 import asyncio
 import logging
+
 from backend.utils.http_client import CLINICALTRIALS_BASE_URL, get_json
 
 logger = logging.getLogger(__name__)
 
 MAX_PAGES = 20  # safety cap on timeline pagination
+
 
 async def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
     """
@@ -22,23 +24,27 @@ async def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
         list[dict]: List of dicts with keys nct_id, brief_title,
             overall_status, start_date, phases, conditions,
             brief_summary, link. Empty list on failure.
-    """   
+    """
     logger.info("ClinicalTrials: fetch_trials started for '%s'", gene_name)
-    
-    params = {"query.term": gene_name,
-              "query.intr": gene_name,
-              "pageSize": page_size,
-              "format": "json",
-              "fields": "NCTId,BriefTitle,OverallStatus,StartDate,Phase,Condition,BriefSummary"}
-    
-    raw = await get_json(f"{CLINICALTRIALS_BASE_URL}/studies", params=params, source="ClinicalTrials")
-    
-    if raw is None: 
+
+    params = {
+        "query.term": gene_name,
+        "query.intr": gene_name,
+        "pageSize": page_size,
+        "format": "json",
+        "fields": "NCTId,BriefTitle,OverallStatus,StartDate,Phase,Condition,BriefSummary",
+    }
+
+    raw = await get_json(
+        f"{CLINICALTRIALS_BASE_URL}/studies", params=params, source="ClinicalTrials"
+    )
+
+    if raw is None:
         return []
-            
+
     trials = []
 
-    for study in raw.get('studies', []):
+    for study in raw.get("studies", []):
         protocol = study.get("protocolSection", {})
 
         identification = protocol.get("identificationModule", {})
@@ -57,20 +63,26 @@ async def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
         brief_summary = protocol.get("descriptionModule", {}).get("briefSummary", "")
 
         link = f"https://clinicaltrials.gov/study/{nct_id}"
-                
-            
-                
-        trials.append({'nct_id': nct_id,
-                       'brief_title': brief_title,
-                       'overall_status': overall_status,
-                       'start_date': start_date,
-                       'phases': phases,
-                       'conditions': conditions,
-                       'brief_summary': brief_summary,
-                       'link': link})
-                
-    logger.info("ClinicalTrials: fetch_trials ended — %d trials collected for '%s'", len(trials), gene_name)
-            
+
+        trials.append(
+            {
+                "nct_id": nct_id,
+                "brief_title": brief_title,
+                "overall_status": overall_status,
+                "start_date": start_date,
+                "phases": phases,
+                "conditions": conditions,
+                "brief_summary": brief_summary,
+                "link": link,
+            }
+        )
+
+    logger.info(
+        "ClinicalTrials: fetch_trials ended — %d trials collected for '%s'",
+        len(trials),
+        gene_name,
+    )
+
     return trials
 
 
@@ -86,42 +98,60 @@ async def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, in
     Returns:
         dict[str, int]: Dict mapping year to trial count, sorted in ascending order.
             Empty dict on failure.
-    """    
+    """
     logger.info("ClinicalTrials: trials_timeline started for '%s'", gene_name)
-    
-    params = {"query.term": gene_name,
-              "query.intr": gene_name, 
-              "pageSize": page_size, 
-              "format": "json", 
-              "fields": "StartDate"}
+
+    params = {
+        "query.term": gene_name,
+        "query.intr": gene_name,
+        "pageSize": page_size,
+        "format": "json",
+        "fields": "StartDate",
+    }
 
     trials_years = {}
-    
+
     for page in range(MAX_PAGES):
-        raw = await get_json(f"{CLINICALTRIALS_BASE_URL}/studies", params=params, source="ClinicalTrials")
+        raw = await get_json(
+            f"{CLINICALTRIALS_BASE_URL}/studies", params=params, source="ClinicalTrials"
+        )
         if raw is None:
-            logger.error("ClinicalTrials: page %d failed for '%s', timeline discarded", page + 1, gene_name)
+            logger.error(
+                "ClinicalTrials: page %d failed for '%s', timeline discarded",
+                page + 1,
+                gene_name,
+            )
             return {}
 
         for study in raw.get("studies", []):
             protocol = study.get("protocolSection", {})
-            start_date = protocol.get("statusModule", {}).get("startDateStruct", {}).get("date", "")
+            start_date = (
+                protocol.get("statusModule", {})
+                .get("startDateStruct", {})
+                .get("date", "")
+            )
             year = start_date[:4]
             if year.isdigit():
                 trials_years[year] = trials_years.get(year, 0) + 1
-            
+
         next_token = raw.get("nextPageToken")
         if not next_token:
             break
         params["pageToken"] = next_token
         await asyncio.sleep(0.5)
     else:
-        logger.warning("ClinicalTrials: MAX_PAGES reached for '%s', timeline truncated", gene_name)
-        
+        logger.warning(
+            "ClinicalTrials: MAX_PAGES reached for '%s', timeline truncated", gene_name
+        )
+
     if not trials_years:
         logger.warning("ClinicalTrials: no trials found for '%s'", gene_name)
 
-    logger.info("ClinicalTrials: trials_timeline ended — %d years, %d trials collected for '%s'",
-                len(trials_years), sum(trials_years.values()), gene_name)
+    logger.info(
+        "ClinicalTrials: trials_timeline ended — %d years, %d trials collected for '%s'",
+        len(trials_years),
+        sum(trials_years.values()),
+        gene_name,
+    )
 
     return dict(sorted(trials_years.items()))
