@@ -8,6 +8,9 @@ timeout, rate-limit and logging behaviour is identical across sources.
 import asyncio
 import logging
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import httpx
 
@@ -37,7 +40,7 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 # Identification (polite pool for OpenAlex, recommended by NCBI)
 CONTACT_EMAIL = os.getenv("TARGETSCOPE_CONTACT_EMAIL", "")
-USER_AGENT = "TargetScope/1.0 (https://github.com/AdrienCosson/TargetScope" + (
+USER_AGENT = "TargetScope/1.0 (https://github.com/Adrien-COSSON/TargetScope" + (
     f"; mailto:{CONTACT_EMAIL})" if CONTACT_EMAIL else ")"
 )
 
