@@ -4,6 +4,7 @@
 import logging
 import logging.handlers
 from pathlib import Path
+
 from backend.config import settings
 
 
@@ -29,7 +30,9 @@ def setup_logging(log_dir: str = "logs") -> None:
 
     # Handler 1 : console
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)  # root filtre, handlers laissent tout passer
+    console_handler.setLevel(
+        logging.DEBUG
+    )  # root filtre, handlers laissent tout passer
     console_handler.setFormatter(console_formatter)
 
     # Handler 2 : file with rotation (max 5 Mo × 3 files)
