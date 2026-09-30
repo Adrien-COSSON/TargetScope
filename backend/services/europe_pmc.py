@@ -2,9 +2,10 @@
 
 # Import libraries
 import logging
-import requests
 import time
-from datetime import date
+from datetime import datetime, timezone
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +31,15 @@ def publication_timeline(gene_name: str) -> dict[str, int]:
 
     pub_count_year = {}
     start_year = 1990
-    
-    for year in range(start_year, date.today().year + 1):
+
+    for year in range(start_year, datetime.now(timezone.utc).year + 1):
         try:
-            params = {"query": f"{gene_name} AND PUB_YEAR:{year}",
-                    "resultType": "lite",
-                    "pageSize": 1,
-                    "format": "json"}
+            params = {
+                "query": f"{gene_name} AND PUB_YEAR:{year}",
+                "resultType": "lite",
+                "pageSize": 1,
+                "format": "json",
+            }
             response = requests.get(url, params=params, timeout=30.0)
             response.raise_for_status()
             time.sleep(0.3)
@@ -44,7 +47,7 @@ def publication_timeline(gene_name: str) -> dict[str, int]:
             data = response.json()
             hit_count = data.get("hitCount", 0)
             pub_count_year[str(year)] = hit_count
-        
+
         except requests.exceptions.RequestException as e:
             logger.warning("EuropePMC: erreur pour %s année %d: %s", gene_name, year, e)
 
