@@ -8,11 +8,13 @@ Endpoint used:
 
 Returns low-level pathways (leaf nodes) containing the entity.
 """
+
 # Import libraries
 import logging
-import time
-import requests
 import re
+import time
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +91,15 @@ def fetch_reactome(uniprot_id: str) -> dict:
             logger.warning(last_error)
 
         except requests.exceptions.Timeout:
-            last_error = f"Reactome request timed out (attempt {attempt}/{MAX_RETRIES})."
+            last_error = (
+                f"Reactome request timed out (attempt {attempt}/{MAX_RETRIES})."
+            )
             logger.warning(last_error)
 
         except requests.exceptions.ConnectionError as exc:
-            last_error = f"Reactome connection error (attempt {attempt}/{MAX_RETRIES}): {exc}."
+            last_error = (
+                f"Reactome connection error (attempt {attempt}/{MAX_RETRIES}): {exc}."
+            )
             logger.warning(last_error)
 
         except requests.exceptions.RequestException as exc:
