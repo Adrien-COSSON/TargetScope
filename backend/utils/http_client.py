@@ -8,6 +8,7 @@ timeout, rate-limit and logging behaviour is identical across sources.
 import asyncio
 import logging
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,19 +18,25 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # APIs URLs
-UNIPROT_BASE_URL        = "https://rest.uniprot.org"
-MYGENE_BASE_URL         = "https://mygene.info/v3"
-PUBMED_BASE_URL         = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-OPENALEX_BASE_URL       = "https://api.openalex.org"
-CHEMBL_BASE_URL         = "https://www.ebi.ac.uk/chembl/api/data"
-HPA_BASE_URL            = "https://www.proteinatlas.org/api"
-CLINVAR_BASE_URL        = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"  # same host as PubMed
-COSMIC_BASE_URL         = "https://cancer.sanger.ac.uk/cosmic/api"  # TODO: verify when writing the service
-MGI_BASE_URL            = "https://www.informatics.jax.org/api"  # TODO: verify when writing the service
+UNIPROT_BASE_URL = "https://rest.uniprot.org"
+MYGENE_BASE_URL = "https://mygene.info/v3"
+PUBMED_BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+OPENALEX_BASE_URL = "https://api.openalex.org"
+CHEMBL_BASE_URL = "https://www.ebi.ac.uk/chembl/api/data"
+HPA_BASE_URL = "https://www.proteinatlas.org/"
+CLINVAR_BASE_URL = (
+    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"  # same host as PubMed
+)
+COSMIC_BASE_URL = (
+    "https://cancer.sanger.ac.uk/cosmic/api"  # TODO: verify when writing the service
+)
+MGI_BASE_URL = (
+    "https://www.informatics.jax.org/api"  # TODO: verify when writing the service
+)
 CLINICALTRIALS_BASE_URL = "https://clinicaltrials.gov/api/v2"
-REACTOME_BASE_URL       = "https://reactome.org/ContentService"
-STRING_BASE_URL         = "https://string-db.org/api"
-LENS_BASE_URL           = "https://api.lens.org"
+REACTOME_BASE_URL = "https://reactome.org/ContentService"
+STRING_BASE_URL = "https://string-db.org/api"
+LENS_BASE_URL = "https://api.lens.org"
 
 # Retry / timeout settings
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=5.0)  # seconds
@@ -114,10 +121,19 @@ async def get_json(
         except httpx.TransportError as e:  # timeouts, connection and protocol errors
             logger.warning(
                 "%s: network error on attempt %d/%d for %s: %s",
-                source, attempt, MAX_RETRIES, url, type(e).__name__,
+                source,
+                attempt,
+                MAX_RETRIES,
+                url,
+                type(e).__name__,
             )
         except httpx.HTTPError as e:
-            logger.error("%s: request error for %s, not retried: %s", source, url, type(e).__name__)
+            logger.error(
+                "%s: request error for %s, not retried: %s",
+                source,
+                url,
+                type(e).__name__,
+            )
             return None
         else:
             if response.is_success:
@@ -135,11 +151,17 @@ async def get_json(
 
             logger.warning(
                 "%s: HTTP %d on attempt %d/%d for %s",
-                source, response.status_code, attempt, MAX_RETRIES, url,
+                source,
+                response.status_code,
+                attempt,
+                MAX_RETRIES,
+                url,
             )
 
         if attempt < MAX_RETRIES:
             await asyncio.sleep(_retry_delay(response, attempt))
 
-    logger.error("%s: definitive failure after %d attempts for %s", source, MAX_RETRIES, url)
+    logger.error(
+        "%s: definitive failure after %d attempts for %s", source, MAX_RETRIES, url
+    )
     return None
