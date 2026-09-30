@@ -23,7 +23,7 @@ MYGENE_BASE_URL = "https://mygene.info/v3"
 PUBMED_BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 OPENALEX_BASE_URL = "https://api.openalex.org"
 CHEMBL_BASE_URL = "https://www.ebi.ac.uk/chembl/api/data"
-HPA_BASE_URL = "https://www.proteinatlas.org/"
+HPA_BASE_URL = "https://www.proteinatlas.org"
 CLINVAR_BASE_URL = (
     "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"  # same host as PubMed
 )
