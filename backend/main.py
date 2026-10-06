@@ -1,6 +1,5 @@
-# backend\main.py
+# backend/main.py
 
-# Import libraries
 import logging
 from contextlib import asynccontextmanager
 
@@ -23,7 +22,6 @@ from backend.utils.logger import setup_logging
 # from backend.routers.synthesis import router as synthesis_router
 # from backend.routers.target import router as target_router
 
-setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -31,14 +29,15 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app):
     # --- DÉMARRAGE ---
-    # tout ce qui est écrit ici s'exécute quand uvicorn démarre
+    # s'exécute uniquement dans le processus qui sert l'API
+    # (pas dans le processus parent du reloader uvicorn)
+    setup_logging()
     await get_client()  # initialise le HTTP client
     logger.info("TargetScope API started")
 
     yield  # ← l'app tourne normalement ici
 
     # --- ARRÊT ---
-    # tout ce qui est écrit ici s'exécute quand uvicorn s'arrête
     await close_client()  # ferme le HTTP client proprement
     logger.info("TargetScope API stopped")
 

@@ -1,20 +1,29 @@
-# backend\utils\logger.py
+# backend/utils/logger.py
 
-# Import libraries
 import logging
 import logging.handlers
 from pathlib import Path
 
 from backend.config import settings
 
+# Project root: backend/utils/logger.py -> parents[2]
+DEFAULT_LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
 
-def setup_logging(log_dir: str = "logs") -> None:
+
+def setup_logging(log_dir: Path = DEFAULT_LOG_DIR) -> None:
     """Logging configuration for the whole project.
 
-    Call once at application startup (main.py or FastAPI lifespan).
+    Call once at application startup (FastAPI lifespan).
+    Safe to call several times: handlers are only added once.
     All modules then use logging.getLogger(__name__) directly.
     """
-    Path(log_dir).mkdir(exist_ok=True)
+    root_logger = logging.getLogger()
+
+    # Idempotence guard: already configured, do nothing
+    if root_logger.handlers:
+        return
+
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
 
@@ -28,25 +37,25 @@ def setup_logging(log_dir: str = "logs") -> None:
         datefmt="%H:%M:%S",
     )
 
-    # Handler 1 : console
+    # Handler 1: console
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(
-        logging.DEBUG
-    )  # root filtre, handlers laissent tout passer
+    console_handler.setLevel(logging.DEBUG)  # root filters, handlers pass everything
     console_handler.setFormatter(console_formatter)
 
-    # Handler 2 : file with rotation (max 5 Mo × 3 files)
+    # Handler 2: file with rotation (max 5 MB x 3 files)
     file_handler = logging.handlers.RotatingFileHandler(
-        filename=f"{log_dir}/app.log",
-        maxBytes=5 * 1024 * 1024,  # 5 Mo
+        filename=log_dir / "app.log",
+        maxBytes=5 * 1024 * 1024,
         backupCount=3,
         encoding="utf-8",
     )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(file_formatter)
 
-    # Root logger — inherits across all modules
-    root_logger = logging.getLogger()
+    # Root logger: inherited by all modules
     root_logger.setLevel(level)
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
+
+    # httpx logs full URLs at INFO, including API keys in query params
+    logging.getLogger("httpx").setLevel(logging.WARNING)
