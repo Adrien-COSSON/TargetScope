@@ -5,11 +5,11 @@ import logging
 from datetime import date
 
 from backend.config import settings
-from backend.utils.http_client import get_json
+from backend.utils.http_client import get_json, PUBMED_BASE_URL
 
 logger = logging.getLogger(__name__)
 
-ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+ESEARCH_URL = f"{PUBMED_BASE_URL}/esearch.fcgi"
 RECENT_YEARS = 5
 NCBI_TOOL = "TargetScope"
 
@@ -30,9 +30,11 @@ def _base_params(gene_name: str) -> dict:
     return params
 
 
-def _extract_count(data: dict | None) -> int:
-    """Return the hit count from an esearch response, 0 if missing."""
-    return int((data or {}).get("esearchresult", {}).get("count", 0))
+def _extract_count(data: dict | None) -> int | None:
+    """Return the hit count from an esearch response, None if the request failed."""
+    if data is None:
+        return None
+    return int(data.get("esearchresult", {}).get("count", 0))
 
 
 async def fetch_pubmed(gene_name: str) -> dict:
@@ -48,9 +50,10 @@ async def fetch_pubmed(gene_name: str) -> dict:
     Returns:
         A dict with keys:
             - gene_name (str)
-            - total_count (int)
-            - recent_count (int)
+            - total_count (int | None)
+            - recent_count (int | None)
             - recent_window (str): e.g. "2022-2026"
+        Counts are None when PubMed could not be reached, 0 when the gene has no publication.
     """
     logger.info("PubMed: fetch_pubmed started for '%s'", gene_name)
 
