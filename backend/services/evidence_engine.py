@@ -691,8 +691,7 @@ def score_biological_knowledge(
             + (f": {', '.join(i['partner'] for i in strong[:5])}" if strong else "")
         )
 
-    # uniprot.py returns {} on failure: an empty dict means "unknown"
-    if uniprot:
+    if uniprot and uniprot.get("found"):
         sources.append("UniProt")
         has_function = bool(uniprot.get("function"))
         parts["function"] = 1.0 if has_function else 0.0
@@ -1020,8 +1019,6 @@ def _source_status(name: str, result) -> SourceStatus:
     if result is None:
         return SourceStatus(source=name, status="unavailable")
     if isinstance(result, dict):
-        if not result:  # uniprot.py returns {} on failure
-            return SourceStatus(source=name, status="unavailable")
         if "found" in result:
             status = {None: "unavailable", False: "no_data"}.get(result["found"], "ok")
             return SourceStatus(source=name, status=status)
