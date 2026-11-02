@@ -37,6 +37,7 @@ CLINICALTRIALS_BASE_URL = "https://clinicaltrials.gov/api/v2"
 REACTOME_BASE_URL = "https://reactome.org/ContentService"
 STRING_BASE_URL = "https://string-db.org/api"
 LENS_BASE_URL = "https://api.lens.org"
+OPENTARGETS_GRAPHQL_URL = "https://api.platform.opentargets.org/api/v4/graphql"
 
 # Retry / timeout settings
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=5.0)  # seconds
@@ -90,12 +91,16 @@ def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
     return RETRY_BACKOFF * attempt
 
 
-async def get_json(
+async def _request_json(
+    method: str,
     url: str,
     params: dict | None = None,
+    json_body: dict | None = None,
     source: str = "HTTP",
 ) -> dict | list | None:
-    """GET a URL and return its decoded JSON body, retrying only recoverable errors.
+    """Send a request and return its decoded JSON body, retrying only recoverable errors.
+
+    Shared by get_json() and post_json() so every source gets the same behaviour.
 
     Retried: timeouts, network/transport errors, HTTP 429 and 5xx.
     Not retried: other 4xx (e.g. 400 malformed ID, 404 unknown ID), invalid JSON,
@@ -105,8 +110,10 @@ async def get_json(
     `params` (e.g. NCBI api_key) cannot leak into the logs.
 
     Args:
+        method (str): "GET" or "POST".
         url (str): Endpoint URL, without query string.
         params (dict | None): Query parameters.
+        json_body (dict | None): JSON body (POST only, e.g. a GraphQL query).
         source (str): Source name used as log prefix (e.g. "UniProt").
 
     Returns:
@@ -117,7 +124,7 @@ async def get_json(
     for attempt in range(1, MAX_RETRIES + 1):
         response = None
         try:
-            response = await client.get(url, params=params)
+            response = await client.request(method, url, params=params, json=json_body)
         except httpx.TransportError as e:  # timeouts, connection and protocol errors
             logger.warning(
                 "%s: network error on attempt %d/%d for %s: %s",
@@ -165,3 +172,27 @@ async def get_json(
         "%s: definitive failure after %d attempts for %s", source, MAX_RETRIES, url
     )
     return None
+
+
+async def get_json(
+    url: str,
+    params: dict | None = None,
+    source: str = "HTTP",
+) -> dict | list | None:
+    """GET a URL and return its decoded JSON body (None on failure).
+
+    Signature unchanged: every existing service keeps working as before.
+    """
+    return await _request_json("GET", url, params=params, source=source)
+
+
+async def post_json(
+    url: str,
+    json_body: dict,
+    source: str = "HTTP",
+) -> dict | list | None:
+    """POST a JSON body and return the decoded JSON response (None on failure).
+
+    Used for GraphQL APIs (Open Targets), where the query travels in the body.
+    """
+    return await _request_json("POST", url, json_body=json_body, source=source)
