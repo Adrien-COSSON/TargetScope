@@ -408,9 +408,16 @@ def _parse_indication(indication: dict, target: dict, focus: dict) -> dict:
     else:
         has_evidence = False
 
+    # Therapeutic areas of the indication: from its own row, else from its
+    # sub-diseases (a broad term like "cancer" has no direct row)
+    areas = direct["therapeutic_areas"] if direct else sorted(
+        {ta for row in descendants for ta in row.get("therapeutic_areas", [])}
+    )
+
     return {
         "disease_id": indication["id"],
         "disease_name": indication["name"],
+        "therapeutic_areas": areas,  # e.g. ["cancer or benign tumor"]
         "direct_score": direct["score"] if direct else 0.0,
         "direct_datatype_scores": direct["datatype_scores"] if direct else {},
         "associated_descendant_count": max(descendant_count, 0),
