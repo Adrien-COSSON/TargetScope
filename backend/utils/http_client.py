@@ -36,6 +36,7 @@ ALLIANCE_BASE_URL = "https://www.alliancegenome.org/api"
 CLINICALTRIALS_BASE_URL = "https://clinicaltrials.gov/api/v2"
 REACTOME_BASE_URL = "https://reactome.org/ContentService"
 STRING_BASE_URL = "https://string-db.org/api"
+EUROPEPMC_BASE_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 LENS_BASE_URL = "https://api.lens.org"
 OPENTARGETS_GRAPHQL_URL = "https://api.platform.opentargets.org/api/v4/graphql"
 
@@ -97,6 +98,7 @@ async def _request_json(
     params: dict | None = None,
     json_body: dict | None = None,
     source: str = "HTTP",
+    not_found=None,
 ) -> dict | list | None:
     """Send a request and return its decoded JSON body, retrying only recoverable errors.
 
@@ -115,6 +117,9 @@ async def _request_json(
         params (dict | None): Query parameters.
         json_body (dict | None): JSON body (POST only, e.g. a GraphQL query).
         source (str): Source name used as log prefix (e.g. "UniProt").
+        not_found: Value returned on HTTP 404, for APIs where 404 means
+            "no data" rather than an error (e.g. Reactome: no pathway).
+            Default None keeps 404 = failure.
 
     Returns:
         dict | list | None: Decoded JSON on success, None on failure.
@@ -150,6 +155,10 @@ async def _request_json(
                     logger.error("%s: invalid JSON response from %s", source, url)
                     return None
 
+            if response.status_code == 404 and not_found is not None:
+                logger.info("%s: 404 for %s, treated as 'no data'", source, url)
+                return not_found
+
             if response.status_code not in RETRYABLE_STATUS:
                 logger.warning(
                     "%s: HTTP %d for %s, not retried", source, response.status_code, url
@@ -178,12 +187,15 @@ async def get_json(
     url: str,
     params: dict | None = None,
     source: str = "HTTP",
+    not_found=None,
 ) -> dict | list | None:
     """GET a URL and return its decoded JSON body (None on failure).
 
-    Signature unchanged: every existing service keeps working as before.
+    Existing calls are unchanged; `not_found` is optional (see _request_json).
     """
-    return await _request_json("GET", url, params=params, source=source)
+    return await _request_json(
+        "GET", url, params=params, source=source, not_found=not_found
+    )
 
 
 async def post_json(
