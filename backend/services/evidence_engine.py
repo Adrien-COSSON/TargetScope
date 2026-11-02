@@ -16,10 +16,18 @@ Every score is built the same way:
 """
 
 import logging
+from datetime import date, datetime, timezone
 
-from datetime import date
-
-from backend.schemas.evidence import EvidenceGap, EvidenceScore, LiteratureTrend
+from backend.schemas.evidence import (
+    EvidenceGap,
+    EvidenceScore,
+    IndicationContext,
+    LiteratureTrend,
+    SafetySignal,
+    SourceStatus,
+    TargetAssessment,
+)
+from backend.schemas.target import Target
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +122,28 @@ CONFIG = {
         # Open Targets rna_expression (Expression Atlas: disease vs normal) -> score
         "tiers": [(0.5, 1.0), (0.2, 0.6), (0.0001, 0.3)],
     },
+    "safety": {
+        # gnomAD LOEUF below this = intolerant to losing one copy
+        "loeuf_intolerant": 0.35,
+        # HPA tissue names are matched by substring (lower case)
+        "critical_tissues": ["heart", "liver", "kidney", "brain", "cerebral", "bone marrow", "lung"],
+        # HPA rna_tissue_specificity values meaning "restricted expression"
+        "restricted_specificity": ["Tissue enriched", "Group enriched", "Tissue enhanced"],
+        # HPA rna_tissue_distribution values meaning "broad expression"
+        "broad_distribution": ["Detected in all", "Detected in many"],
+        "max_lethality_terms": 3,  # terms quoted in the mouse lethality signal
+    },
 }
+
+# Order of the radar axes (TargetAssessment.scores follows it)
+DIMENSIONS = [
+    "human_genetics",
+    "clinical_precedence",
+    "tractability",
+    "biological_knowledge",
+    "animal_models",
+    "disease_expression",
+]
 
 # Open Targets tractability buckets that mean clinical precedence (not prediction)
 OT_CLINICAL_BUCKETS = {"Approved Drug": 4.0, "Advanced Clinical": 3.0, "Phase 1 Clinical": 1.0}
@@ -862,3 +891,208 @@ def score_disease_expression(
 
     return EvidenceScore(dimension="disease_expression", score=score, label=label_for(score),
                          explanation=explanation, facts=facts, sources=sources), gaps
+
+
+# ---------------------------------------------------------------------------
+# Safety signals (never a score: no signal does not mean safe)
+# ---------------------------------------------------------------------------
+def safety_signals(
+    open_targets: dict | None, mgi: dict | None, chembl: dict | None, hpa: dict | None
+) -> list[SafetySignal]:
+    """Potential ON-TARGET safety considerations, i.e. linked to modulating the
+    target itself, whatever the molecule. Compound-specific toxicity (off-target,
+    hERG, reactive metabolites) depends on chemistry and is out of scope.
+
+    Every signal is a prompt for expert review, worded as such.
+    """
+    cfg = CONFIG["safety"]
+    signals: list[SafetySignal] = []
+
+    # --- 1. Curated clinical liabilities (Open Targets) -------------------------
+    for item in (open_targets or {}).get("safety_liabilities") or []:
+        directions = sorted({e["direction"] for e in item.get("effects") or [] if e.get("direction")})
+        signals.append(SafetySignal(
+            category="clinical_liability",
+            statement=f"{item['event']} reported"
+                      + (f" with {' / '.join(directions).lower()}" if directions else ""),
+            source="Open Targets",
+            references=item.get("datasources") or [],
+        ))
+
+    # --- 2. Human genetic constraint (gnomAD via Open Targets) -------------------
+    constraint = (open_targets or {}).get("genetic_constraint") or {}
+    loeuf = constraint.get("loeuf")
+    intolerant = loeuf is not None and loeuf < cfg["loeuf_intolerant"]
+    if intolerant:
+        signals.append(SafetySignal(
+            category="genetic_constraint",
+            statement=(f"Intolerant to loss of function in humans (LOEUF {loeuf:.2f} < "
+                       f"{cfg['loeuf_intolerant']}): strong chronic inhibition may be poorly tolerated"),
+            source="gnomAD (via Open Targets)",
+            caveat="Constraint reflects lifelong germline loss; partial or transient "
+                   "pharmacological inhibition can be better tolerated.",
+        ))
+
+    # --- 3. Mouse lethality (MGI) -------------------------------------------------
+    lethal = (mgi or {}).get("lethality_phenotypes") or []
+    if lethal:
+        terms = [p["term"] for p in lethal[: cfg["max_lethality_terms"]]]
+        pmids = sorted({pmid for p in lethal for pmid in p.get("pmids", [])})[:5]
+        signals.append(SafetySignal(
+            category="mouse_phenotype",
+            statement="Lethality reported in mouse models: " + "; ".join(terms),
+            source="MGI",
+            caveat=("Pools all alleles, incl. compound and activating ones; a germline "
+                    "knockout is not a pharmacological inhibition in adults."),
+            references=pmids,
+        ))
+
+    # --- 4. Drug labels: black box warnings and withdrawals (ChEMBL) -------------
+    flagged = [d for d in (chembl or {}).get("drugs") or []
+               if d.get("black_box_warning") or d.get("withdrawn")]
+    if flagged:
+        names = ", ".join(
+            d["name"] + (" (withdrawn)" if d.get("withdrawn") else "")
+            for d in flagged[:5] if d.get("name")
+        )
+        signals.append(SafetySignal(
+            category="drug_label",
+            statement=f"Drugs on the target with a black box warning or withdrawal: {names}",
+            source="ChEMBL",
+            caveat="May be molecule-specific rather than target-related: check the label reason.",
+        ))
+
+    # --- 5. Expression profile (HPA): the therapeutic window logic ---------------
+    # Broad expression, even moderate, means modulation reaches many tissues;
+    # expression restricted to the disease tissue is what lowers the risk.
+    expression = (hpa or {}).get("expression") or {}
+    specificity = expression.get("rna_tissue_specificity")
+    distribution = expression.get("rna_tissue_distribution")
+    enriched = expression.get("rna_tissue_specific_ntpm") or {}
+
+    if distribution in cfg["broad_distribution"] and specificity not in cfg["restricted_specificity"]:
+        # Much stronger when the gene is also essential (constraint or mouse lethality)
+        essential = [label for flag, label in ((intolerant, "LoF-intolerant in humans"),
+                                               (bool(lethal), "lethal in mouse models")) if flag]
+        signals.append(SafetySignal(
+            category="tissue_expression",
+            statement=("Broad tissue expression (" + distribution.lower() + "): modulation may "
+                       "affect many tissues" + (f"; combined with: {', '.join(essential)}" if essential else "")),
+            source="HPA",
+            expression_level=specificity,
+            caveat=None if essential else "Common profile (about half of human genes): weigh it with the other signals.",
+        ))
+
+    for tissue, ntpm in enriched.items():
+        if any(c in tissue.lower() for c in cfg["critical_tissues"]):
+            signals.append(SafetySignal(
+                category="tissue_expression",
+                statement=f"Preferential expression in {tissue} ({specificity})",
+                source="HPA",
+                tissue=tissue,
+                expression_level=f"nTPM {ntpm:g}",
+                caveat="Lower concern if this is the disease tissue.",
+            ))
+
+    return signals
+
+
+def expression_note(hpa: dict | None) -> str | None:
+    """Favourable fact: restricted expression suggests a wider therapeutic window."""
+    expression = (hpa or {}).get("expression") or {}
+    specificity = expression.get("rna_tissue_specificity")
+    if specificity in CONFIG["safety"]["restricted_specificity"]:
+        tissues = ", ".join(expression.get("rna_tissue_specific_ntpm") or {})
+        return (f"Restricted expression ({specificity}{': ' + tissues if tissues else ''}): "
+                "potentially wider therapeutic window (HPA)")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Source status
+# ---------------------------------------------------------------------------
+def _source_status(name: str, result) -> SourceStatus:
+    """ok / no_data / unavailable for one service result.
+
+    Each service has its own shape; the rule is always the same:
+    None (or found=None) = unavailable, found=False or empty = no_data.
+    """
+    if result is None:
+        return SourceStatus(source=name, status="unavailable")
+    if isinstance(result, dict):
+        if not result:  # uniprot.py returns {} on failure
+            return SourceStatus(source=name, status="unavailable")
+        if "found" in result:
+            status = {None: "unavailable", False: "no_data"}.get(result["found"], "ok")
+            return SourceStatus(source=name, status=status)
+        # services without "found": judged on their main payload
+        for key in ("total_count", "total_variants", "pathways", "interactions", "timeline", "total"):
+            if key in result:
+                value = result[key]
+                if value is None:
+                    return SourceStatus(source=name, status="unavailable")
+                return SourceStatus(source=name, status="ok" if value else "no_data")
+    return SourceStatus(source=name, status="ok")
+
+
+# ---------------------------------------------------------------------------
+# Assembly
+# ---------------------------------------------------------------------------
+SOURCE_NAMES = ["open_targets", "chembl", "clinvar", "uniprot", "pubmed", "europe_pmc",
+                "reactome", "string", "mgi", "hpa", "clinicaltrials"]
+
+
+def assess(target: Target, results: dict) -> TargetAssessment:
+    """Build the full TargetAssessment from the results of every service.
+
+    Pure function: `results` maps a service name (SOURCE_NAMES) to what that
+    service returned, collected in parallel elsewhere. clinicaltrials is
+    {"total": int | None}. A missing key is treated as an unavailable source.
+    """
+    r = results.get
+    logger.info("Evidence engine: assessing %s", target.gene_symbol)
+
+    scored = {
+        "human_genetics": score_human_genetics(r("open_targets"), r("clinvar"), r("uniprot")),
+        "clinical_precedence": score_clinical_precedence(r("chembl"), r("open_targets"), r("clinicaltrials")),
+        "tractability": score_tractability(r("chembl"), r("open_targets")),
+        "biological_knowledge": score_biological_knowledge(r("pubmed"), r("reactome"), r("string"), r("uniprot")),
+        "animal_models": score_animal_models(r("mgi"), r("open_targets")),
+        "disease_expression": score_disease_expression(r("open_targets"), r("hpa")),
+    }
+    scores = [scored[d][0] for d in DIMENSIONS]
+    gaps = [g for d in DIMENSIONS for g in scored[d][1]]
+    gaps.sort(key=lambda g: {"high": 0, "medium": 1, "low": 2}[g.severity])  # most severe first
+
+    # The favourable "restricted expression" fact goes with the disease_expression axis
+    note = expression_note(r("hpa"))
+    if note:
+        scores[DIMENSIONS.index("disease_expression")].facts.append(note)
+
+    indication = None
+    ind = (r("open_targets") or {}).get("indication")
+    if ind:
+        best = ind.get("best_descendant")
+        indication = IndicationContext(
+            disease_id=ind["disease_id"],
+            disease_name=ind["disease_name"],
+            direct_score=ind.get("direct_score", 0.0),
+            associated_descendant_count=ind.get("associated_descendant_count", 0),
+            best_descendant=f"{best['disease_name']} ({best['score']:.2f})" if best else None,
+            has_evidence=ind.get("has_evidence"),
+        )
+
+    assessment = TargetAssessment(
+        target=target,
+        indication=indication,
+        scores=scores,
+        gaps=gaps,
+        safety_signals=safety_signals(r("open_targets"), r("mgi"), r("chembl"), r("hpa")),
+        literature=literature_trend(r("pubmed"), r("europe_pmc")),
+        sources=[_source_status(n, r(n)) for n in SOURCE_NAMES],
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        engine_version=ENGINE_VERSION,
+    )
+    logger.info("Evidence engine: %s assessed (%d gaps, %d safety signals)",
+                target.gene_symbol, len(gaps), len(assessment.safety_signals))
+    return assessment
