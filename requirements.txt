@@ -3,7 +3,7 @@ uvicorn
 pydantic
 pydantic-settings
 httpx
-requests
-dotenv
+python-dotenv
+anthropic
 ruff
 pytest

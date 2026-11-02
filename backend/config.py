@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     )
 
     anthropic_api_key: str | None = None  # required only by synthesis.py
+    # Model writing the synthesis (Claude API id). Sonnet: good writing at ~2 cents
+    # per assessment; change it here or with ANTHROPIC_MODEL in .env
+    anthropic_model: str = "claude-sonnet-5-5"
     pubmed_api_key: str | None = None
     contact_email: str | None = Field(
         default=None, validation_alias="TARGETSCOPE_CONTACT_EMAIL"
