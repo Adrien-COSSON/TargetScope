@@ -11,7 +11,7 @@ from backend.utils.provenance import make_provenance
 
 logger = logging.getLogger(__name__)
 
-FIELDS = "symbol,name,entrezgene,ensembl.gene,alias,uniprot,type_of_gene"
+FIELDS = "symbol,name,entrezgene,ensembl.gene,alias,uniprot,type_of_gene,HGNC"
 MAX_HITS = 20
 
 # Official UniProt accession format
@@ -151,6 +151,9 @@ async def resolve_target(query: str) -> Target:
     uniprot_id = _first(hit.get("uniprot", {}).get("Swiss-Prot"))
     ensembl = _first(hit.get("ensembl"))
     ensembl_id = ensembl.get("gene") if isinstance(ensembl, dict) else None
+    # MyGene gives the bare number ("3236"); other APIs expect the CURIE "HGNC:3236"
+    hgnc = hit.get("HGNC")
+    hgnc_id = f"HGNC:{hgnc}" if hgnc else None
 
     logger.info("MyGene: resolve_target ended: '%s' -> %s (Entrez: %s, strategy: %s, confidence: %s)",
                 query, hit.get("symbol"), entrez_id, strategy, confidence)
@@ -160,6 +163,7 @@ async def resolve_target(query: str) -> Target:
                   name=hit.get("name"),
                   uniprot_id=uniprot_id,entrez_id=entrez_id,
                   ensembl_id=ensembl_id,
+                  hgnc_id=hgnc_id,
                   aliases=_as_list(hit.get("alias")),species="Homo sapiens",
                   resolution_provenance=make_provenance(
                       source="mygene.info",

@@ -28,6 +28,7 @@ class Target(BaseModel):
     entrez_id: int | None = None  # like 1956
     ensembl_id: str | None = None  # like "ENSG00000146648"
     chembl_id: str | None = None  # like "CHEMBL203"
+    hgnc_id: str | None = None  # like "HGNC:3236", needed for mouse orthologs (mgi.py)
     aliases: list[str] = []  # like ["HER1", "ErbB1", "mENA", ...]
     species: str = "Homo sapiens"
     resolution_provenance: Provenance | None = None
