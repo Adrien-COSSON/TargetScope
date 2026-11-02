@@ -11,7 +11,33 @@ logger = logging.getLogger(__name__)
 MAX_PAGES = 20  # safety cap on timeline pagination
 
 
-async def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
+def _base_params(gene_name: str) -> dict:
+    """Search shared by every call: the gene in the record AND in the interventions.
+
+    query.intr narrows to trials whose interventions mention the gene, which
+    removes many (not all) studies where it is only a biomarker.
+    """
+    return {"query.term": gene_name, "query.intr": gene_name, "format": "json"}
+
+
+async def count_trials(gene_name: str) -> int | None:
+    """Total number of matching trials, in one call (no pagination).
+
+    countTotal=true makes the API return the total; pageSize=1 keeps the
+    response tiny. None if ClinicalTrials.gov could not be reached.
+    """
+    raw = await get_json(
+        f"{CLINICALTRIALS_BASE_URL}/studies",
+        params={**_base_params(gene_name), "countTotal": "true", "pageSize": 1,
+                "fields": "NCTId"},
+        source="ClinicalTrials",
+    )
+    if raw is None:
+        return None
+    return int(raw.get("totalCount", 0))
+
+
+async def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict] | None:
     """
     Fetch the most recent clinical trials from ClinicalTrials.gov
     for a given gene or protein name.
@@ -23,15 +49,13 @@ async def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
     Returns:
         list[dict]: List of dicts with keys nct_id, brief_title,
             overall_status, start_date, phases, conditions,
-            brief_summary, link. Empty list on failure.
+            brief_summary, link. None on failure, [] if no trial matches.
     """
     logger.info("ClinicalTrials: fetch_trials started for '%s'", gene_name)
 
     params = {
-        "query.term": gene_name,
-        "query.intr": gene_name,
+        **_base_params(gene_name),
         "pageSize": page_size,
-        "format": "json",
         "fields": "NCTId,BriefTitle,OverallStatus,StartDate,Phase,Condition,BriefSummary",
     }
 
@@ -40,7 +64,7 @@ async def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
     )
 
     if raw is None:
-        return []
+        return None  # failure, distinct from "no trial" ([])
 
     trials = []
 
@@ -86,7 +110,7 @@ async def fetch_trials(gene_name: str, page_size: int = 10) -> list[dict]:
     return trials
 
 
-async def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, int]:
+async def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, int] | None:
     """
     Fetch the number of clinical trials per year from ClinicalTrials.gov
     for a given gene or protein name, paginating through all results.
@@ -97,17 +121,11 @@ async def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, in
 
     Returns:
         dict[str, int]: Dict mapping year to trial count, sorted in ascending order.
-            Empty dict on failure.
+            None on failure, {} if no trial matches.
     """
     logger.info("ClinicalTrials: trials_timeline started for '%s'", gene_name)
 
-    params = {
-        "query.term": gene_name,
-        "query.intr": gene_name,
-        "pageSize": page_size,
-        "format": "json",
-        "fields": "StartDate",
-    }
+    params = {**_base_params(gene_name), "pageSize": page_size, "fields": "StartDate"}
 
     trials_years = {}
 
@@ -121,7 +139,7 @@ async def trials_timeline(gene_name: str, page_size: int = 1000) -> dict[str, in
                 page + 1,
                 gene_name,
             )
-            return {}
+            return None  # a partial timeline would look like a decline
 
         for study in raw.get("studies", []):
             protocol = study.get("protocolSection", {})

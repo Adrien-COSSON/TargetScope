@@ -31,7 +31,8 @@ async def fetch_uniprot(uniprot_id: str) -> dict:
             - disease_associations (list[dict]): name, accession (UniProt DI-), mim (OMIM ID).
             - tissue_specificity (str | None): Tissue expression description.
             - isoform_count (int | None): Number of annotated isoforms.
-            - empty dict on failure
+            - found (bool | None): True on success, None if UniProt could not
+              be reached (then the dict holds only this key)
     """
     logger.info("UniProt: fetch_uniprot started for '%s'", uniprot_id)
 
@@ -40,7 +41,7 @@ async def fetch_uniprot(uniprot_id: str) -> dict:
     )
 
     if data is None:
-        return {}
+        return {"found": None}
 
     function_text = None
     subcellular_location = None
@@ -102,6 +103,7 @@ async def fetch_uniprot(uniprot_id: str) -> dict:
     logger.info("UniProt: fetch_uniprot ended for '%s'", uniprot_id)
 
     return {
+        "found": True,
         "function": function_text,
         "function_pmids": function_pmids,
         "subcellular_location": subcellular_location,
