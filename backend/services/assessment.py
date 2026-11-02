@@ -32,10 +32,12 @@ from backend.services.uniprot import fetch_uniprot
 
 logger = logging.getLogger(__name__)
 
-# Hard limit per source. A slow source (seen: ChEMBL taking 30-45 s on EGFR,
-# probably a cold server-side cache) must not hold the whole assessment:
-# past this delay it is reported as unavailable, which the engine handles.
-SOURCE_TIMEOUT = 25  # seconds
+# Hard limit per source. Each HTTP request already times out at 20 s and is
+# retried (http_client), so a slow first call + a fast retry takes ~30 s
+# (seen on ChEMBL / EGFR, probably a cold server-side cache). 45 s lets that
+# case through while still bounding a real hang: past it, the source is
+# reported as unavailable, which the engine handles.
+SOURCE_TIMEOUT = 45  # seconds
 
 
 async def _safe(name: str, coro):
