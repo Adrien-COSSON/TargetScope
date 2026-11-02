@@ -30,9 +30,9 @@ CLINVAR_BASE_URL = (
 COSMIC_BASE_URL = (
     "https://cancer.sanger.ac.uk/cosmic/api"  # TODO: verify when writing the service
 )
-MGI_BASE_URL = (
-    "https://www.informatics.jax.org/api"  # TODO: verify when writing the service
-)
+# MGI has no stable public JSON API: its curated mouse data is served
+# by the Alliance of Genome Resources (checked with scripts/explore_mgi*.py)
+ALLIANCE_BASE_URL = "https://www.alliancegenome.org/api"
 CLINICALTRIALS_BASE_URL = "https://clinicaltrials.gov/api/v2"
 REACTOME_BASE_URL = "https://reactome.org/ContentService"
 STRING_BASE_URL = "https://string-db.org/api"
