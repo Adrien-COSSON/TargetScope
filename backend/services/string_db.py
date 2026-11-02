@@ -1,121 +1,96 @@
-# backend\services\string_db.py
+# backend/services/string_db.py
+"""STRING service: functional protein-protein interaction partners.
 
-# Import libraries
+Feeds the "biological knowledge" dimension: a well-connected protein sits in a
+characterised network, and its partners hint at pathway context and
+potential on-target liabilities (shared complexes, signalling hubs).
+"""
+
 import logging
-import time
 
-import requests
+from backend.utils.http_client import STRING_BASE_URL, get_json
+from backend.utils.provenance import make_provenance
 
 logger = logging.getLogger(__name__)
 
-REQUEST_TIMEOUT = 10  # seconds
-MAX_RETRIES = 3
-RETRY_BACKOFF = 2.0  # seconds
+PARTNERS_URL = f"{STRING_BASE_URL}/json/interaction_partners"
+NETWORK_PAGE_URL = "https://string-db.org/network/9606.{string_id}"
+HUMAN_TAXON = 9606
+MAX_PARTNERS = 10
+
+# STRING asks API users to identify themselves
+CALLER_IDENTITY = "TargetScope"
 
 
-def fetch_string(uniprot_id: str, gene_name: str) -> dict:
-    """Fetch protein-protein interactions from STRING for a given UniProt accession.
+def _parse_partners(raw: list[dict]) -> list[dict]:
+    """Return partner symbol and combined score (0-1), strongest first.
 
-    Queries the STRING API for the top 10 interactions involving the target,
-    filtered to Homo sapiens (taxon 9606).
+    interaction_partners always puts the queried protein in "_A" and the
+    partner in "_B", so there is no need to match names (the previous
+    'network' endpoint mixed in partner-partner edges and required it).
+    """
+    partners = [
+        {
+            "partner": item.get("preferredName_B"),
+            "string_id": item.get("stringId_B"),
+            "score": item.get("score"),
+        }
+        for item in raw
+        if item.get("preferredName_B")
+    ]
+    partners.sort(key=lambda p: p["score"] or 0.0, reverse=True)
+    return partners
+
+
+async def fetch_string(uniprot_id: str) -> dict:
+    """Fetch the top functional interaction partners of a protein from STRING.
 
     Args:
         uniprot_id: UniProt accession, e.g. "P04637".
-        gene_name: HGNC gene symbol, e.g. "TP53". Used to identify the target
-            within each interaction pair and extract the partner.
 
     Returns:
-        A dict with the following keys:
-            - uniprot_id (str): the queried accession
-            - interactions (list[dict]): each item contains:
-                  - partner (str): gene symbol of the interacting protein
-                  - score (float): STRING combined score (0 to 1)
-            - error (str | None): error message if the request failed,
-              None otherwise
+        A dict with keys:
+            - uniprot_id (str)
+            - interactions (list[dict] | None): partner, string_id, score (0-1),
+              strongest first; None if STRING could not be reached,
+              [] if the protein has no known partner
+            - provenance (Provenance | None)
+        STRING scores combine experimental, database, co-expression and
+        text-mining evidence: a high score is functional association,
+        not necessarily direct physical binding.
     """
-    string_db_url = f"https://string-db.org/api/json/network?identifiers={uniprot_id}&species=9606&limit=10"
+    logger.info("STRING: fetch_string started for '%s'", uniprot_id)
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = requests.get(string_db_url, timeout=REQUEST_TIMEOUT)
+    raw = await get_json(
+        PARTNERS_URL,
+        params={
+            "identifiers": uniprot_id,
+            "species": HUMAN_TAXON,
+            "limit": MAX_PARTNERS,
+            "caller_identity": CALLER_IDENTITY,
+        },
+        source="STRING",
+    )
 
-            if response.status_code == 200:
-                raw: list[dict] = response.json()
-                interactions = _parse_interactions(raw, gene_name)
-                return {
-                    "uniprot_id": uniprot_id,
-                    "interactions": interactions,
-                    "error": None,
-                }
+    if raw is None:
+        return {"uniprot_id": uniprot_id, "interactions": None, "provenance": None}
 
-            if response.status_code == 404:
-                logger.info("Reactome: no pathways found for %s (404)", uniprot_id)
-                return {"uniprot_id": uniprot_id, "interactions": [], "error": None}
+    interactions = _parse_partners(raw)
+    # STRING id of the query protein, e.g. "9606.ENSP00000269305", for the link
+    query_id = raw[0].get("stringId_A") if raw else None
 
-            # Any other HTTP error — retry on 5xx, fail immediately on 4xx
-            if 400 <= response.status_code < 500:
-                msg = f"String_db HTTP {response.status_code} for {uniprot_id}."
-                logger.error(msg)
-                return {"uniprot_id": uniprot_id, "interactions": [], "error": msg}
-
-            # 5xx — transient, worth retrying
-            last_error = f"String_db HTTP {response.status_code} (attempt {attempt}/{MAX_RETRIES})."
-            logger.warning(last_error)
-
-        except requests.exceptions.Timeout:
-            last_error = (
-                f"String_db request timed out (attempt {attempt}/{MAX_RETRIES})."
-            )
-            logger.warning(last_error)
-
-        except requests.exceptions.ConnectionError as exc:
-            last_error = (
-                f"String_db connection error (attempt {attempt}/{MAX_RETRIES}): {exc}."
-            )
-            logger.warning(last_error)
-
-        except requests.exceptions.RequestException as exc:
-            last_error = f"String_db unexpected request error: {exc}."
-            logger.error(last_error)
-            break  # non-retryable
-
-        if attempt < MAX_RETRIES:
-            time.sleep(RETRY_BACKOFF * attempt)
-
-    return {"uniprot_id": uniprot_id, "interactions": [], "error": last_error}
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _parse_interactions(raw: list[dict], gene_name: str) -> list[dict]:
-    """Extract direct interactions with the target from raw STRING response.
-
-    Filters interaction pairs where gene_name is involved and returns
-    the partner gene symbol and combined score for each.
-
-    Args:
-        raw: list of interaction dicts returned by the STRING API.
-        gene_name: HGNC gene symbol of the query target.
-
-    Returns:
-        List of dicts with keys 'partner' (str) and 'score' (float).
-        Pairs not involving gene_name are silently skipped.
-    """
-    interactions = []
-    for item in raw:
-        name_a = item.get("preferredName_A", "")
-        name_b = item.get("preferredName_B", "")
-        score = item.get("score", 0.0)
-
-        if name_a == gene_name:
-            partner = name_b
-        elif name_b == gene_name:
-            partner = name_a
-        else:
-            continue  # paire sans rapport avec la cible
-
-        interactions.append({"partner": partner, "score": score})
-    return interactions
+    logger.info(
+        "STRING: fetch_string ended for '%s' (%d partners)", uniprot_id, len(interactions)
+    )
+    return {
+        "uniprot_id": uniprot_id,
+        "interactions": interactions,
+        "provenance": make_provenance(
+            source="STRING",
+            source_id=query_id,
+            url=NETWORK_PAGE_URL.format(string_id=query_id.split(".", 1)[1])
+            if query_id
+            else None,
+            confidence="medium",  # functional association, partly text-mined
+        ),
+    }

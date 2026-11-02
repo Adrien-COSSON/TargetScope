@@ -1,54 +1,83 @@
-# backend/services/europe_pmc.py  (ajout)
+# backend/services/europe_pmc.py
+"""Europe PMC service: yearly publication timeline for a gene.
 
-# Import libraries
+Feeds the "biological knowledge" dimension with a trend: is the target
+emerging, growing, stable or declining in the literature?
+(PubMed gives the totals; Europe PMC gives the year-by-year shape.)
+"""
+
+import asyncio
 import logging
-import time
-from datetime import datetime, timezone
+from datetime import date
 
-import requests
+from backend.utils.http_client import EUROPEPMC_BASE_URL, get_json
 
 logger = logging.getLogger(__name__)
 
-EUROPEPMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+SEARCH_URL = f"{EUROPEPMC_BASE_URL}/search"
+START_YEAR = 1990
+
+# Europe PMC has no per-year facet in its REST search, so we need one call per
+# year. They run in parallel, capped to stay polite with EBI servers.
+MAX_CONCURRENT = 5
 
 
-def publication_timeline(gene_name: str) -> dict[str, int]:
-    """
-    Retourne un histogramme {année: count} des publications EuropePMC
-    pour un nom de gène/protéine, via la facette PUB_YEAR.
+async def _count_for_year(term: str, year: int, semaphore: asyncio.Semaphore) -> int | None:
+    """Number of publications matching `term` in a given year (None on failure)."""
+    async with semaphore:  # at most MAX_CONCURRENT calls in flight
+        data = await get_json(
+            SEARCH_URL,
+            params={
+                "query": f"{term} AND PUB_YEAR:{year}",
+                "resultType": "lite",
+                "pageSize": 1,  # we only read hitCount
+                "format": "json",
+            },
+            source="EuropePMC",
+        )
+    if data is None:
+        return None
+    return int(data.get("hitCount", 0))
+
+
+async def publication_timeline(gene_name: str) -> dict:
+    """Return the yearly publication counts of a gene since START_YEAR.
+
+    The search is restricted to titles and abstracts, as in pubmed.py:
+    full-text matches on short symbols (e.g. "KIT", "MET") are very noisy.
 
     Args:
-        gene_name: Nom ou alias du gène (ex. "BRCA1", "TP53").
+        gene_name: HGNC gene symbol, e.g. "TP53".
 
     Returns:
-        Dict trié par année croissante. Vide si aucun résultat.
-
-    Raises:
-        requests.exceptions.HTTPError: Si l'API renvoie un code d'erreur HTTP.
-        requests.exceptions.RequestException: En cas de timeout ou de problème réseau.
+        A dict with keys:
+            - gene_name (str)
+            - timeline (dict[str, int | None] | None): {"1990": 12, ...},
+              oldest first; a year is None if its request failed
+            - failed_years (int): number of years that could not be fetched
+        timeline is None only if every year failed (Europe PMC unreachable).
+        The current year is partial: only publications indexed so far.
     """
-    url = f"{EUROPEPMC_BASE}/search"
+    logger.info("EuropePMC: publication_timeline started for '%s'", gene_name)
 
-    pub_count_year = {}
-    start_year = 1990
+    # Quotes: exact symbol match; TITLE/ABSTRACT: same scope as PubMed
+    term = f'(TITLE:"{gene_name}" OR ABSTRACT:"{gene_name}")'
+    years = list(range(START_YEAR, date.today().year + 1))
 
-    for year in range(start_year, datetime.now(timezone.utc).year + 1):
-        try:
-            params = {
-                "query": f"{gene_name} AND PUB_YEAR:{year}",
-                "resultType": "lite",
-                "pageSize": 1,
-                "format": "json",
-            }
-            response = requests.get(url, params=params, timeout=30.0)
-            response.raise_for_status()
-            time.sleep(0.3)
+    # The semaphore is created here, inside the running event loop
+    # (creating it at import time could bind it to another loop in tests)
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    counts = await asyncio.gather(*(_count_for_year(term, y, semaphore) for y in years))
 
-            data = response.json()
-            hit_count = data.get("hitCount", 0)
-            pub_count_year[str(year)] = hit_count
+    timeline = {str(year): count for year, count in zip(years, counts)}
+    failed = sum(1 for c in counts if c is None)
 
-        except requests.exceptions.RequestException as e:
-            logger.warning("EuropePMC: erreur pour %s année %d: %s", gene_name, year, e)
+    if failed == len(years):
+        logger.error("EuropePMC: every request failed for '%s'", gene_name)
+        return {"gene_name": gene_name, "timeline": None, "failed_years": failed}
 
-    return dict(sorted(pub_count_year.items()))
+    if failed:
+        logger.warning("EuropePMC: %d/%d years failed for '%s'", failed, len(years), gene_name)
+
+    logger.info("EuropePMC: publication_timeline ended for '%s'", gene_name)
+    return {"gene_name": gene_name, "timeline": timeline, "failed_years": failed}
