@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from backend.schemas.target import Target
 
-# The five radar axes. Literal = Pydantic rejects any other value,
+# The six radar axes. Literal = Pydantic rejects any other value,
 # so a typo in the engine fails loudly instead of creating a 6th axis.
 Dimension = Literal[
     "human_genetics",
@@ -26,6 +26,7 @@ Dimension = Literal[
     "tractability",
     "biological_knowledge",
     "animal_models",
+    "disease_expression",  # expression of the target in the chosen indication
 ]
 
 ScoreLabel = Literal["Strong", "Moderate", "Limited", "None", "Unavailable"]
@@ -124,7 +125,7 @@ class TargetAssessment(BaseModel):
 
     target: Target
     indication: IndicationContext | None = None  # None = no indication chosen
-    scores: list[EvidenceScore]  # always the five dimensions, in radar order
+    scores: list[EvidenceScore]  # always the six dimensions, in radar order
     gaps: list[EvidenceGap] = []
     safety_signals: list[SafetySignal] = []
     literature: LiteratureTrend = LiteratureTrend()
