@@ -70,6 +70,10 @@ CONFIG = {
         "other_diseases_only": 0.2,
         # fallback when Open Targets is down: ClinVar pathogenic variants
         "clinvar_only": 0.4,
+        # Somatic mutation frequency in the indication (Cancer Gene Census /
+        # COSMIC). Distinguishes a major driver (KRAS in PDAC, ~70%) from a
+        # minor one (XPO1 in CLL, ~5%), which Open Targets scores cannot.
+        "mutation_frequency_tiers": [(0.3, 1.0), (0.1, 0.8), (0.03, 0.6), (0.0001, 0.4)],
     },
     "clinical_precedence": {
         # Open Targets "clinical" datatype on the indication -> late stage
@@ -109,6 +113,8 @@ CONFIG = {
     },
     "animal_models": {
         "tiers": {
+            # a mouse genotype annotated as a model of the indication (MGI)
+            "disease_model": 1.0,
             "relevant_strong": 1.0,  # mouse phenotype mapped to the disease, strong (OT animal_model)
             "relevant_some": 0.7,  # mouse phenotype mapped to the disease, weaker
             "well_characterised": 0.6,  # many mouse phenotypes, none mapped to the disease
@@ -359,6 +365,21 @@ def _indication_associations(open_targets: dict) -> list[dict]:
     return rows
 
 
+def _best_with_fallback(open_targets: dict, datatypes: list[str]) -> tuple[float, dict | None, bool]:
+    """Best datatype score on the indication (+ sub-diseases), else on its
+    OncoTree parents. Returns (score, holding association, from_parent).
+
+    Parents are a fallback only: evidence is often annotated one level up
+    (KRAS somatic data on "pancreatic adenocarcinoma", not on PDAC).
+    """
+    best, holder = _best_datatype(_indication_associations(open_targets), datatypes)
+    if best > 0:
+        return best, holder, False
+    ind = open_targets.get("indication") or {}
+    best, holder = _best_datatype(ind.get("fallback_associations") or [], datatypes)
+    return best, holder, best > 0
+
+
 # ---------------------------------------------------------------------------
 # Dimension: human genetics
 # ---------------------------------------------------------------------------
@@ -401,16 +422,23 @@ def score_human_genetics(
                 f"({best_any:.2f}) (Open Targets)"
             )
         if indication:
-            best_focus, focus_holder = _best_datatype(
-                _indication_associations(open_targets), cfg["datatypes"]
-            )
+            best_focus, focus_holder, via_parent = _best_with_fallback(open_targets, cfg["datatypes"])
             if focus_holder:
                 facts.append(
                     f"Genetic evidence in {indication['disease_name']}: "
-                    f"{focus_holder['disease_name']} ({best_focus:.2f}) (Open Targets)"
+                    f"{focus_holder['disease_name']} ({best_focus:.2f})"
+                    + (" [parent tumour type]" if via_parent else "")
+                    + " (Open Targets)"
                 )
             else:
                 facts.append(f"No genetic evidence in {indication['disease_name']} (Open Targets)")
+            mutation = indication.get("mutation_frequency")
+            if mutation:
+                facts.append(
+                    f"Somatically mutated in {mutation['frequency']:.1%} of {mutation['disease_name']} "
+                    f"samples ({_fmt(mutation['mutated'])}/{_fmt(mutation['tested'])}, "
+                    "COSMIC via Cancer Gene Census)"
+                )
 
     # --- ClinVar / UniProt (facts) -------------------------------------------
     pathogenic = None
@@ -435,9 +463,15 @@ def score_human_genetics(
         return 0.0
 
     if ot_ok and indication:
-        if best_focus > 0:
-            score = tiered(best_focus)
-            explanation = f"Human genetic evidence in the indication (best {best_focus:.2f})."
+        mutation = indication.get("mutation_frequency")
+        freq_score = _tiered(mutation["frequency"], cfg["mutation_frequency_tiers"]) if mutation else 0.0
+        if best_focus > 0 or freq_score > 0:
+            score = max(tiered(best_focus), freq_score)
+            explanation = (
+                f"Somatic driver in {mutation['frequency']:.0%} of cases in the indication."
+                if freq_score >= tiered(best_focus) and mutation
+                else f"Human genetic evidence in the indication (best {best_focus:.2f})."
+            )
         elif best_any > 0:
             score = cfg["other_diseases_only"]
             explanation = "Human genetic evidence exists, but not for the chosen indication."
@@ -521,10 +555,11 @@ def score_clinical_precedence(
     if ot_ok:
         sources.append("Open Targets")
         if indication:
-            ind_clinical, holder = _best_datatype(_indication_associations(open_targets), ["clinical"])
+            ind_clinical, holder, via_parent = _best_with_fallback(open_targets, ["clinical"])
             facts.append(
                 f"Clinical evidence in {indication['disease_name']}: "
                 + (f"{holder['disease_name']} ({ind_clinical:.2f})" if holder else "none")
+                + (" [parent tumour type]" if via_parent else "")
                 + " (Open Targets)"
             )
 
@@ -578,6 +613,15 @@ def score_clinical_precedence(
 
     return EvidenceScore(dimension="clinical_precedence", score=score, label=label_for(score),
                          explanation=explanation, facts=facts, sources=sources), gaps
+
+
+def _name_key(name: str) -> frozenset[str]:
+    """Order-insensitive key for ontology names.
+
+    Disease Ontology says "lung non-small cell carcinoma", Open Targets
+    "non-small cell lung carcinoma": same words, different order.
+    """
+    return frozenset(name.lower().replace(",", " ").split())
 
 
 def _tiered(value: float | int | None, tiers: list[tuple[float, float]]) -> float:
@@ -772,6 +816,19 @@ def score_animal_models(
         elif indication:
             facts.append(f"No mouse model evidence for {indication['disease_name']} (Open Targets)")
 
+    # --- MGI: mouse genotypes annotated as models of the indication ------------
+    matched: list[dict] = []
+    if mgi_ok and indication and mgi.get("disease_models"):
+        # Disease Ontology names (MGI) vs indication name + exact synonyms (Open Targets)
+        names = {_name_key(n) for n in [indication["disease_name"], *indication.get("synonyms", [])]}
+        matched = [m for m in mgi["disease_models"] if _name_key(m["disease"]) in names]
+        if matched:
+            facts.insert(0, "Mouse models of the indication: " + ", ".join(
+                f"{m['disease']} ({_plural(m['model_count'], 'genotype')})" for m in matched) + " (MGI)")
+    elif mgi_ok and not indication and mgi.get("disease_models"):
+        top = mgi["disease_models"][:5]
+        facts.append("Diseases modelled in mouse: " + ", ".join(m["disease"] for m in top) + " (MGI)")
+
     # --- MGI: breadth of mouse phenotypes ----------------------------------------
     count = None
     if mgi_ok:
@@ -789,7 +846,9 @@ def score_animal_models(
             facts.append("MGI phenotypes pool all alleles (knockouts, conditional, activating knock-ins)")
 
     # --- Score ---------------------------------------------------------------
-    if relevant >= cfg["relevant_strong_min"]:
+    if matched:
+        tier, explanation = "disease_model", "Established mouse model(s) of the indication."
+    elif relevant >= cfg["relevant_strong_min"]:
         tier, explanation = "relevant_strong", "Mouse models reproduce disease-relevant phenotypes."
     elif relevant > 0:
         tier, explanation = "relevant_some", "Some disease-relevant mouse model evidence."
@@ -870,26 +929,19 @@ def score_disease_expression(
         score = _tiered(best, cfg["tiers"])
         explanation = "Target deregulated in the indication (disease vs normal)."
     else:
+        # Not scored rather than 0: Open Targets differential-expression data are
+        # sparse (none for EGFR-NSCLC, KRAS-PDAC, XPO1-CLL), so their absence is
+        # not evidence of absence. A real source (TCGA vs GTEx) is a V2 item.
         facts.insert(0, f"No differential expression data for {indication['disease_name']} (Open Targets)")
-        score = 0.0
-        explanation = ("No differential expression evidence in the indication. "
-                       "Such data are sparse outside oncology: absence is weak evidence.")
-
-    gaps = []
-    if score == 0.0:
-        gaps.append(EvidenceGap(
-            dimension="disease_expression",
-            description=f"No evidence of target deregulation in {indication['disease_name']}",
-            severity="low",
-            why_it_matters=(
-                "Expression in the diseased tissue supports biological relevance and, "
-                "for antibodies or ADCs, is a prerequisite. Here it should be checked "
-                "experimentally (patient samples, IHC)."
-            ),
-        ))
+        return EvidenceScore(
+            dimension="disease_expression", score=None, label="Unavailable",
+            explanation=("Not assessable: no disease-vs-normal expression data for this "
+                         "indication. To be checked experimentally (patient samples, IHC)."),
+            facts=facts, sources=sources,
+        ), []
 
     return EvidenceScore(dimension="disease_expression", score=score, label=label_for(score),
-                         explanation=explanation, facts=facts, sources=sources), gaps
+                         explanation=explanation, facts=facts, sources=sources), []
 
 
 # ---------------------------------------------------------------------------
@@ -907,15 +959,21 @@ def safety_signals(
     cfg = CONFIG["safety"]
     signals: list[SafetySignal] = []
 
-    # --- 1. Curated clinical liabilities (Open Targets) -------------------------
-    for item in (open_targets or {}).get("safety_liabilities") or []:
-        directions = sorted({e["direction"] for e in item.get("effects") or [] if e.get("direction")})
+    # --- 1. Curated clinical liabilities (Open Targets), grouped ----------------
+    # One signal listing every event: 15 separate lines drown the other signals.
+    # Events seen with inhibition come first, since most programmes inhibit.
+    liabilities = (open_targets or {}).get("safety_liabilities") or []
+    if liabilities:
+        def with_inhibition(item):
+            return any("inhibition" in (e.get("direction") or "").lower() for e in item.get("effects") or [])
+
+        ordered = sorted(liabilities, key=lambda i: (not with_inhibition(i), i["event"]))
+        events = ", ".join(i["event"] + (" (inhibition)" if with_inhibition(i) else "") for i in ordered)
         signals.append(SafetySignal(
             category="clinical_liability",
-            statement=f"{item['event']} reported"
-                      + (f" with {' / '.join(directions).lower()}" if directions else ""),
+            statement=f"{_plural(len(ordered), 'adverse event')} reported for modulators of the target: {events}",
             source="Open Targets",
-            references=item.get("datasources") or [],
+            references=sorted({s for i in ordered for s in i.get("datasources") or []}),
         ))
 
     # --- 2. Human genetic constraint (gnomAD via Open Targets) -------------------
