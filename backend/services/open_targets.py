@@ -131,7 +131,26 @@ query Focus($ensemblId: String!, $ids: [String!], $size: Int!) {
 # An indication and all the diseases below it in the ontology
 DISEASE_QUERY = """
 query Disease($diseaseId: String!) {
-  disease(efoId: $diseaseId) { id name descendants }
+  disease(efoId: $diseaseId) {
+    id name descendants
+    synonyms { relation terms }
+    parents { id name dbXRefs }
+  }
+}
+"""
+
+# Somatic mutation frequency from Cancer Gene Census evidence (COSMIC counts).
+# IntOGen rows are NOT used: they only count mutated samples of driver cohorts
+# (e.g. 115/115), which says nothing about frequency.
+SOMATIC_QUERY = """
+query Somatic($ensemblId: String!, $diseaseId: String!) {
+  disease(efoId: $diseaseId) {
+    name
+    evidences(ensemblIds: [$ensemblId], enableIndirect: false,
+              datasourceIds: ["cancer_gene_census"], size: 20) {
+      rows { mutatedSamples { numberSamplesTested numberMutatedSamples } }
+    }
+  }
 }
 """
 
@@ -223,17 +242,37 @@ def _parse_constraint(items: list[dict]) -> dict | None:
     return None
 
 
+# Safety entries kept out: in vitro assay hits (ToxCast) are not clinical
+# liabilities, and some terms are too generic to inform a decision
+EXCLUDED_SAFETY_SOURCES = {"ToxCast"}
+GENERIC_SAFETY_EVENTS = {"drug toxicity", "toxicity", "adverse drug reaction"}
+# Spelling / wording variants merged into one event
+SAFETY_SYNONYMS = {"diarrhoea": "diarrhea", "skin rash": "rash", "hepatotoxicity": "liver injury"}
+
+
+def _normalise_event(name: str) -> str:
+    key = name.strip().lower()
+    return SAFETY_SYNONYMS.get(key, key)
+
+
 def _parse_safety(items: list[dict]) -> list[dict]:
-    """One entry per safety event, with its sources and effects merged."""
+    """One entry per (normalised) safety event, sources and effects merged.
+
+    Cleaning, checked on EGFR (20 raw entries): ToxCast assay terms and generic
+    labels are dropped, and spelling variants ("Diarrhea", "diarrhoea") merged.
+    """
     events: dict[str, dict] = {}
     for item in items or []:
         name = item.get("event")
-        if not name:
+        if not name or item.get("datasource") in EXCLUDED_SAFETY_SOURCES:
+            continue
+        key = _normalise_event(name)
+        if key in GENERIC_SAFETY_EVENTS:
             continue
         entry = events.setdefault(
-            name,
-            {"event": name, "event_id": item.get("eventId"), "datasources": set(), "effects": []},
+            key, {"event": key, "event_id": item.get("eventId"), "datasources": set(), "effects": []}
         )
+        entry["event_id"] = entry["event_id"] or item.get("eventId")
         if item.get("datasource"):
             entry["datasources"].add(item["datasource"])
         for effect in item.get("effects") or []:
@@ -343,12 +382,59 @@ async def search_diseases(text: str) -> list[dict] | None:
 
 
 async def _focus_ids(indication_id: str) -> tuple[dict | None, list[str]]:
-    """Return the indication (id, name) and the ids of the diseases below it."""
+    """Return the indication and the ids of the diseases below it.
+
+    The indication dict also carries:
+      - synonyms: exact synonyms (used to match mouse disease models by name)
+      - fallback_parents: parents that are a recognised tumour type (they have
+        an ONCOTREE code). Evidence is often annotated one level up (KRAS somatic
+        data sit on "pancreatic adenocarcinoma", not on PDAC), but MONDO parents
+        can be misleading (CLL has "acute lymphoblastic leukemia" as a parent),
+        so only clinically defined tumour types are used, and only as fallback.
+    """
     data = await _graphql(DISEASE_QUERY, {"diseaseId": indication_id})
     disease = (data or {}).get("disease")
     if not disease:
         return None, []
-    return {"id": disease.get("id"), "name": disease.get("name")}, disease.get("descendants") or []
+    synonyms = [
+        term
+        for group in disease.get("synonyms") or []
+        if group.get("relation") == "hasExactSynonym"
+        for term in group.get("terms") or []
+    ]
+    fallback_parents = [
+        {"id": p["id"], "name": p["name"]}
+        for p in disease.get("parents") or []
+        if any(x.startswith("ONCOTREE:") for x in p.get("dbXRefs") or [])
+    ]
+    indication = {
+        "id": disease.get("id"),
+        "name": disease.get("name"),
+        "synonyms": synonyms,
+        "fallback_parents": fallback_parents,
+    }
+    return indication, disease.get("descendants") or []
+
+
+async def _mutation_frequency(ensembl_id: str, disease_id: str) -> dict | None | bool:
+    """Somatic mutation frequency of the target in one disease.
+
+    Returns a dict (disease_name, mutated, tested, frequency), False if the
+    source answered without data, None if the request failed.
+    """
+    data = await _graphql(SOMATIC_QUERY, {"ensemblId": ensembl_id, "diseaseId": disease_id})
+    if data is None:
+        return None
+    disease = data.get("disease") or {}
+    best = None
+    for row in ((disease.get("evidences") or {}).get("rows")) or []:
+        # one row per consequence type, with the same totals: keep the largest
+        for ms in row.get("mutatedSamples") or []:
+            tested, mutated = ms.get("numberSamplesTested"), ms.get("numberMutatedSamples")
+            if tested and mutated is not None and (best is None or mutated / tested > best["frequency"]):
+                best = {"disease_name": disease.get("name"), "mutated": mutated,
+                        "tested": tested, "frequency": round(mutated / tested, 3)}
+    return best if best else False
 
 
 async def _fetch_focus(ensembl_id: str, ids: list[str]) -> dict | None:
@@ -379,7 +465,9 @@ async def _fetch_focus(ensembl_id: str, ids: list[str]) -> dict | None:
     return {"count": count, "rows": rows[:TOP_ASSOCIATIONS]}
 
 
-def _parse_indication(indication: dict, target: dict, focus: dict) -> dict:
+def _parse_indication(
+    indication: dict, target: dict, focus: dict, parent_rows: list[dict], mutation: dict | None
+) -> dict:
     """Summarise the target's evidence on the chosen indication.
 
     Two levels, both from direct evidence only:
@@ -424,6 +512,13 @@ def _parse_indication(indication: dict, target: dict, focus: dict) -> dict:
         # best-scored sub-disease, e.g. "acute myeloid leukemia" under "cancer"
         "best_descendant": descendants[0] if descendants else None,
         "has_evidence": has_evidence,
+        "synonyms": indication.get("synonyms", []),
+        # Associations of the OncoTree parents, used by the engine only as a
+        # fallback when the indication itself carries no evidence of a type
+        "fallback_associations": parent_rows,
+        # e.g. {"disease_name": "pancreatic adenocarcinoma", "mutated": 6582,
+        #       "tested": 9331, "frequency": 0.705}; None if no data
+        "mutation_frequency": mutation,
     }
 
 
@@ -485,13 +580,21 @@ async def fetch_open_targets(
         },
     )
 
-    async def _no_focus():
+    async def _nothing():
         return None
 
-    # Main query and focus chunks are independent -> parallel
-    data, focus = await asyncio.gather(
-        main_call, _fetch_focus(ensembl_id, focus_ids) if focus_ids else _no_focus()
+    parent_ids = [p["id"] for p in (indication or {}).get("fallback_parents", [])]
+
+    # Main query, focus chunks, OncoTree parents and mutation frequencies are
+    # independent -> all in parallel
+    data, focus, parents, *mutations = await asyncio.gather(
+        main_call,
+        _fetch_focus(ensembl_id, focus_ids) if focus_ids else _nothing(),
+        _fetch_focus(ensembl_id, parent_ids) if parent_ids else _nothing(),
+        *(_mutation_frequency(ensembl_id, d) for d in ([indication["id"]] if indication else []) + parent_ids),
     )
+    # Frequency on the indication itself first, else on the first parent with data
+    mutation = next((m for m in mutations if m), None)
     if data is None:
         return _empty_result(ensembl_id, found=None)
     if indication is not None and focus is None:
@@ -515,7 +618,11 @@ async def fetch_open_targets(
         "tractability": _parse_tractability(target.get("tractability")),
         "genetic_constraint": _parse_constraint(target.get("geneticConstraint")),
         "safety_liabilities": _parse_safety(target.get("safetyLiabilities")),
-        "indication": _parse_indication(indication, target, focus) if indication else None,
+        "indication": _parse_indication(
+            indication, target, focus, _parse_associations((parents or {}).get("rows") or []), mutation
+        )
+        if indication
+        else None,
         "focus_associations": _parse_associations(focus["rows"]) if indication and focus else None,
         "provenance": make_provenance(
             source="Open Targets Platform",
