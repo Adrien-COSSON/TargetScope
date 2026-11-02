@@ -50,6 +50,30 @@ CONFIG = {
             "nothing": 0.0,
         },
     },
+    "human_genetics": {
+        # Open Targets datatypes counted as genetic evidence. somatic_mutation
+        # is included: in oncology, recurrent somatic drivers ARE the genetics.
+        "datatypes": ["genetic_association", "somatic_mutation", "genetic_literature"],
+        # best genetic datatype score -> axis score (first threshold reached)
+        "tiers": [(0.8, 1.0), (0.5, 0.7), (0.2, 0.4), (0.0001, 0.2)],
+        # genetic evidence exists, but only for diseases other than the indication
+        "other_diseases_only": 0.2,
+        # fallback when Open Targets is down: ClinVar pathogenic variants
+        "clinvar_only": 0.4,
+    },
+    "clinical_precedence": {
+        # Open Targets "clinical" datatype on the indication -> late stage
+        "indication_late_stage_min": 0.8,
+        "tiers": {
+            "approved_in_indication": 1.0,  # approved drug on the target + strong clinical score
+            "clinical_in_indication": 0.7,  # clinical evidence in the indication
+            "approved_elsewhere": 0.6,  # approved / clinical on the target, other diseases
+            "clinical_elsewhere": 0.5,
+            "non_selective_only": 0.3,  # only via a family / complex
+            "trials_mention_only": 0.1,  # ClinicalTrials mentions, no drug on the target
+            "nothing": 0.0,
+        },
+    },
 }
 
 # Open Targets tractability buckets that mean clinical precedence (not prediction)
@@ -231,3 +255,257 @@ def score_tractability(
         facts=facts,
         sources=sources,
     ), gaps
+
+
+# ---------------------------------------------------------------------------
+# Helpers on Open Targets associations
+# ---------------------------------------------------------------------------
+def _best_datatype(associations: list[dict], datatypes: list[str]) -> tuple[float, dict | None]:
+    """Highest score among `datatypes` over a list of associations.
+
+    Returns (score, the association that holds it).
+    """
+    best, holder = 0.0, None
+    for assoc in associations or []:
+        for dt in datatypes:
+            value = (assoc.get("datatype_scores") or {}).get(dt, 0.0)
+            if value > best:
+                best, holder = value, assoc
+    return best, holder
+
+
+def _indication_associations(open_targets: dict) -> list[dict]:
+    """Associations to score against when an indication is chosen.
+
+    The indication itself (direct row) plus its best sub-diseases: for a broad
+    indication ("cancer"), the evidence lives in the sub-diseases.
+    """
+    rows = list(open_targets.get("focus_associations") or [])
+    ind = open_targets.get("indication") or {}
+    if ind.get("direct_datatype_scores"):
+        rows.append({
+            "disease_name": ind.get("disease_name"),
+            "datatype_scores": ind["direct_datatype_scores"],
+        })
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Dimension: human genetics
+# ---------------------------------------------------------------------------
+def score_human_genetics(
+    open_targets: dict | None, clinvar: dict | None, uniprot: dict | None
+) -> tuple[EvidenceScore, list[EvidenceGap]]:
+    """Is the target-disease link supported by human genetics?
+
+    Human genetic support is the strongest predictor of clinical success
+    among target-level evidence. With an indication, only genetics on that
+    indication (and its sub-diseases) scores high; genetics elsewhere is
+    reported but scores low.
+
+    Sources:
+      - Open Targets: genetic_association, somatic_mutation, genetic_literature
+      - ClinVar: germline pathogenic variants (fact; fallback if OT is down)
+      - UniProt: curated disease involvement (fact)
+    """
+    cfg = CONFIG["human_genetics"]
+    facts: list[str] = []
+    sources: list[str] = []
+    ot_ok = _is_available(open_targets)
+    clinvar_ok = clinvar is not None and clinvar.get("total_variants") is not None
+
+    if not ot_ok and not clinvar_ok:
+        return EvidenceScore(dimension="human_genetics", score=None, label="Unavailable",
+                             explanation="Open Targets and ClinVar could not be reached."), []
+
+    indication = (open_targets or {}).get("indication") if ot_ok else None
+
+    # --- Open Targets ---------------------------------------------------------
+    best_focus, focus_holder = 0.0, None
+    best_any, any_holder = 0.0, None
+    if ot_ok:
+        sources.append("Open Targets")
+        best_any, any_holder = _best_datatype(open_targets.get("top_associations"), cfg["datatypes"])
+        if any_holder:
+            facts.append(
+                f"Strongest genetic evidence overall: {any_holder['disease_name']} "
+                f"({best_any:.2f}) (Open Targets)"
+            )
+        if indication:
+            best_focus, focus_holder = _best_datatype(
+                _indication_associations(open_targets), cfg["datatypes"]
+            )
+            if focus_holder:
+                facts.append(
+                    f"Genetic evidence in {indication['disease_name']}: "
+                    f"{focus_holder['disease_name']} ({best_focus:.2f}) (Open Targets)"
+                )
+            else:
+                facts.append(f"No genetic evidence in {indication['disease_name']} (Open Targets)")
+
+    # --- ClinVar / UniProt (facts) -------------------------------------------
+    pathogenic = None
+    if clinvar_ok:
+        sources.append("ClinVar")
+        counts = clinvar.get("classification_counts") or {}
+        pathogenic = (counts.get("pathogenic") or 0) + (counts.get("likely_pathogenic") or 0)
+        facts.append(f"{_fmt(pathogenic)} germline (likely) pathogenic variants (ClinVar)")
+        conditions = [c["name"] for c in (clinvar.get("top_conditions") or [])[:3]]
+        if conditions:
+            facts.append("Main ClinVar conditions: " + ", ".join(conditions))
+    if uniprot and uniprot.get("disease_associations"):
+        sources.append("UniProt")
+        names = [d.get("name") for d in uniprot["disease_associations"][:3] if d.get("name")]
+        facts.append("UniProt disease involvement: " + ", ".join(names))
+
+    # --- Score ---------------------------------------------------------------
+    def tiered(value: float) -> float:
+        for threshold, score in cfg["tiers"]:
+            if value >= threshold:
+                return score
+        return 0.0
+
+    if ot_ok and indication:
+        if best_focus > 0:
+            score = tiered(best_focus)
+            explanation = f"Human genetic evidence in the indication (best {best_focus:.2f})."
+        elif best_any > 0:
+            score = cfg["other_diseases_only"]
+            explanation = "Human genetic evidence exists, but not for the chosen indication."
+        else:
+            score, explanation = 0.0, "No human genetic evidence found."
+    elif ot_ok:
+        score = tiered(best_any)
+        explanation = (
+            f"Human genetic evidence (best {best_any:.2f}, no indication chosen)."
+            if best_any > 0 else "No human genetic evidence found."
+        )
+    else:
+        # Open Targets down: ClinVar alone can show genetic involvement, not more
+        score = cfg["clinvar_only"] if (pathogenic or 0) > 0 else 0.0
+        explanation = "Based on ClinVar only (Open Targets unavailable): score may be underestimated."
+
+    gaps = []
+    if ot_ok and score <= cfg["other_diseases_only"]:
+        where = f" for {indication['disease_name']}" if indication else ""
+        gaps.append(EvidenceGap(
+            dimension="human_genetics",
+            description=f"No human genetic evidence linking the target to disease{where}",
+            severity="high",
+            why_it_matters=(
+                "Lack of efficacy is the main cause of phase 2 failure, and targets "
+                "with human genetic support are markedly more likely to succeed. "
+                "Without it, the causal role of the target remains a hypothesis."
+            ),
+        ))
+
+    return EvidenceScore(dimension="human_genetics", score=score, label=label_for(score),
+                         explanation=explanation, facts=facts, sources=sources), gaps
+
+
+# ---------------------------------------------------------------------------
+# Dimension: clinical precedence
+# ---------------------------------------------------------------------------
+def score_clinical_precedence(
+    chembl: dict | None, open_targets: dict | None, trials: dict | None
+) -> tuple[EvidenceScore, list[EvidenceGap]]:
+    """Has the target already been tested in the clinic, and where?
+
+    Sources:
+      - ChEMBL: drugs on the target and their max phase (selective or not)
+      - Open Targets: "clinical" datatype on the indication
+      - ClinicalTrials.gov: trials mentioning the gene (fact only: a gene
+        mentioned in a trial is often a biomarker, not a drug target)
+
+    `trials` is {"total": int | None}. ClinicalTrials currently returns []
+    both on failure and on no result, so it never creates a gap on its own.
+    """
+    cfg = CONFIG["clinical_precedence"]
+    tiers = cfg["tiers"]
+    facts: list[str] = []
+    sources: list[str] = []
+    chembl_ok = _is_available(chembl)
+    ot_ok = _is_available(open_targets)
+
+    if not chembl_ok and not ot_ok:
+        return EvidenceScore(dimension="clinical_precedence", score=None, label="Unavailable",
+                             explanation="ChEMBL and Open Targets could not be reached."), []
+
+    # --- ChEMBL: phases, selective vs not --------------------------------------
+    single_phase = any_phase = None
+    if chembl_ok:
+        sources.append("ChEMBL")
+        drugs = chembl.get("drugs") or []
+        single = [d for d in drugs if d.get("via_target_type") == "SINGLE PROTEIN"]
+        single_phase = max((d["max_phase"] for d in single if d.get("max_phase")), default=None)
+        any_phase = max((d["max_phase"] for d in drugs if d.get("max_phase")), default=None)
+        if single_phase:
+            facts.append(f"Most advanced drug on the protein itself: phase {single_phase:g} (ChEMBL)")
+        elif any_phase:
+            facts.append(f"Clinical drugs only via a family or complex: phase {any_phase:g} (ChEMBL)")
+        else:
+            facts.append("No clinical-stage drug on the target (ChEMBL)")
+
+    # --- Open Targets: clinical evidence in the indication ---------------------
+    indication = (open_targets or {}).get("indication") if ot_ok else None
+    ind_clinical = 0.0
+    if ot_ok:
+        sources.append("Open Targets")
+        if indication:
+            ind_clinical, holder = _best_datatype(_indication_associations(open_targets), ["clinical"])
+            facts.append(
+                f"Clinical evidence in {indication['disease_name']}: "
+                + (f"{holder['disease_name']} ({ind_clinical:.2f})" if holder else "none")
+                + " (Open Targets)"
+            )
+
+    # --- ClinicalTrials (fact only) ----------------------------------------------
+    total_trials = (trials or {}).get("total")
+    if total_trials:
+        sources.append("ClinicalTrials.gov")
+        facts.append(f"{_fmt(total_trials)} trials mention the gene (ClinicalTrials.gov; "
+                     "includes biomarker studies)")
+
+    # --- Score ---------------------------------------------------------------
+    clinical_on_target = single_phase is not None and single_phase >= 0.5
+    if indication and ind_clinical >= cfg["indication_late_stage_min"] and single_phase == 4.0:
+        tier, explanation = "approved_in_indication", "Approved drug on the target, late-stage evidence in the indication."
+    elif indication and ind_clinical > 0:
+        tier, explanation = "clinical_in_indication", "Clinical evidence for the target in the indication."
+    elif single_phase == 4.0:
+        tier = "approved_elsewhere"
+        explanation = ("Approved drug on the target, in other indications (expansion / repurposing)."
+                       if indication else "Approved drug on the target.")
+    elif clinical_on_target:
+        tier = "clinical_elsewhere"
+        explanation = ("Clinical-stage drug on the target, in other indications."
+                       if indication else f"Clinical-stage drug on the target (phase {single_phase:g}).")
+    elif any_phase is not None and any_phase >= 0.5:
+        tier, explanation = "non_selective_only", "Clinical drugs only via a protein family or complex."
+    elif total_trials:
+        tier, explanation = "trials_mention_only", "Gene mentioned in clinical trials, no drug acting on it."
+    else:
+        tier, explanation = "nothing", "No clinical precedence: novel target."
+
+    # Without an indication, "elsewhere" tiers describe the whole target
+    if not indication and tier == "approved_elsewhere":
+        score = tiers["approved_in_indication"]
+    elif not indication and tier == "clinical_elsewhere":
+        score = tiers["clinical_in_indication"]
+    else:
+        score = tiers[tier]
+
+    gaps = []
+    if chembl_ok and score == 0.0:
+        gaps.append(EvidenceGap(
+            dimension="clinical_precedence",
+            description="No clinical precedence for this target",
+            severity="low",
+            why_it_matters=(
+                "Novel targets carry more translational risk (no human proof of "
+                "pharmacology or tolerability), but also first-in-class potential."
+            ),
+        ))
+
+    return EvidenceScore(dimension="clinical_precedence", score=score, label=label_for(score),
+                         explanation=explanation, facts=facts, sources=sources), gaps
