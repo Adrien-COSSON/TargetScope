@@ -6,21 +6,11 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
+from backend.routers.assessment import router as assessment_router
 from backend.routers.resolver import router as resolver_router
+from backend.routers.synthesis import router as synthesis_router
 from backend.utils.http_client import close_client, get_client
 from backend.utils.logger import setup_logging
-
-# from backend.routers.biology import router as biology_router
-# from backend.routers.clinical import router as clinical_router
-# from backend.routers.evidence import router as evidence_router
-# from backend.routers.expression import router as expression_router
-# from backend.routers.genetics import router as genetics_router
-# from backend.routers.patents import router as patents_router
-# from backend.routers.pharmacology import router as pharmacology_router
-# from backend.routers.preclinical import router as preclinical_router
-# from backend.routers.publications import router as publications_router
-# from backend.routers.synthesis import router as synthesis_router
-# from backend.routers.target import router as target_router
 
 logger = logging.getLogger(__name__)
 
@@ -52,18 +42,11 @@ app = FastAPI(
 
 
 # 3. routers enregistrés après
+# One assessment call returns every dimension at once, so a few routes are
+# enough (the first plan had one router per domain: biology, clinical...).
 app.include_router(resolver_router, prefix="/api")
-# app.include_router(biology_router, prefix="/api/biology")
-# app.include_router(clinical_router, prefix="/api/clinical")
-# app.include_router(evidence_router, prefix="/api/evidence")
-# app.include_router(expression_router, prefix="/api/expression")
-# app.include_router(genetics_router, prefix="/api/genetics")
-# app.include_router(patents_router, prefix="/api/patents")
-# app.include_router(pharmacology_router, prefix="/api/pharmacology")
-# app.include_router(preclinical_router, prefix="/api/preclinical")
-# app.include_router(publications_router, prefix="/api/publications")
-# app.include_router(synthesis_router, prefix="/api/synthesis")
-# app.include_router(target_router, prefix="/api/target")
+app.include_router(assessment_router, prefix="/api")
+app.include_router(synthesis_router, prefix="/api")
 
 
 # 4. endpoint health
