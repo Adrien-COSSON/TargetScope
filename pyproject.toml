@@ -1,0 +1,14 @@
+# pyproject.toml — tool configuration (dependencies stay in requirements.txt)
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["scripts"]  # throwaway exploration scripts, not shipped
+
+[tool.ruff.lint]
+# E/W: pycodestyle (PEP 8) / F: pyflakes (unused names, undefined variables)
+# I: import order / UP: modern Python syntax / B: likely bugs (bugbear)
+select = ["E", "W", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

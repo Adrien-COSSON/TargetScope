@@ -1,7 +1,8 @@
 # tests/test_hpa.py
 
 # Import libraries
-import httpx
+import asyncio
+
 import pytest
  
 from backend.services import hpa
@@ -141,25 +142,26 @@ def test_confidence_from_reliability(reliability, expected):
  
  
 # ---------- fetch_hpa (get_json mocked) ----------
- 
+# asyncio.run() instead of pytest-asyncio: no extra test dependency.
+
 @pytest.fixture
 def mock_provenance(monkeypatch):
     monkeypatch.setattr(hpa, "make_provenance", lambda **kwargs: kwargs)
- 
- 
-@pytest.mark.asyncio
-async def test_fetch_hpa_builds_url_and_result(monkeypatch, mock_provenance):
+
+
+def test_fetch_hpa_builds_url_and_result(monkeypatch, mock_provenance):
     called_urls = []
- 
+
     async def fake_get_json(url, *args, **kwargs):
         called_urls.append(url)
         return TP53_PAYLOAD
- 
+
     monkeypatch.setattr(hpa, "get_json", fake_get_json)
- 
-    result = await hpa.fetch_hpa("ENSG00000141510")
- 
+
+    result = asyncio.run(hpa.fetch_hpa("ENSG00000141510"))
+
     assert called_urls == [f"{hpa.HPA_BASE_URL}/ENSG00000141510.json"]
+    assert result["found"] is True
     assert result["gene"] == "TP53"
     assert result["uniprot_ids"] == ["P04637"]
     assert result["localization"]["main"] == ["Nucleoplasm"]
@@ -170,16 +172,35 @@ async def test_fetch_hpa_builds_url_and_result(monkeypatch, mock_provenance):
         "url": f"{hpa.HPA_BASE_URL}/ENSG00000141510.json",
         "confidence": "high",  # TP53 reliability_ih = Enhanced
     }
- 
- 
-@pytest.mark.asyncio
-async def test_fetch_hpa_propagates_404(monkeypatch, mock_provenance):
+
+
+def test_fetch_hpa_unreachable_or_unknown_id_is_found_none(monkeypatch, mock_provenance):
+    """get_json returns None on failure (it never raises): no crash, found=None."""
     async def fake_get_json(url, *args, **kwargs):
-        request = httpx.Request("GET", url)
-        response = httpx.Response(404, request=request)
-        raise httpx.HTTPStatusError("Not Found", request=request, response=response)
- 
+        return None
+
     monkeypatch.setattr(hpa, "get_json", fake_get_json)
- 
-    with pytest.raises(httpx.HTTPStatusError):
-        await hpa.fetch_hpa("ENSG_FAKE")
+
+    result = asyncio.run(hpa.fetch_hpa("ENSG_FAKE"))
+    assert result["found"] is None
+    assert result["expression"] is None and result["prognostics"] is None
+
+
+# ---------- _parse_cancer_expression ----------
+
+def test_parse_cancer_expression_finds_unit_by_prefix():
+    payload = {
+        "RNA cancer specificity": "Cancer enriched",
+        "RNA cancer specificity score": 12.3,
+        "RNA cancer distribution": "Detected in many",
+        "RNA cancer specific pTPM": {"Liver Hepatocellular Carcinoma (TCGA)": "38403.3"},
+    }
+    parsed = hpa._parse_cancer_expression(payload)
+    assert parsed["specificity"] == "Cancer enriched"
+    assert parsed["unit"] == "pTPM"
+    assert parsed["specific_expression"] == {"Liver Hepatocellular Carcinoma (TCGA)": 38403.3}
+
+
+def test_parse_cancer_expression_low_specificity():
+    parsed = hpa._parse_cancer_expression({"RNA cancer specificity": "Low cancer specificity"})
+    assert parsed["specific_expression"] is None and parsed["unit"] is None
