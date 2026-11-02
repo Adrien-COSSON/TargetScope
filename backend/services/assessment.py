@@ -32,16 +32,28 @@ from backend.services.uniprot import fetch_uniprot
 
 logger = logging.getLogger(__name__)
 
+# Hard limit per source. A slow source (seen: ChEMBL taking 30-45 s on EGFR,
+# probably a cold server-side cache) must not hold the whole assessment:
+# past this delay it is reported as unavailable, which the engine handles.
+SOURCE_TIMEOUT = 25  # seconds
+
 
 async def _safe(name: str, coro):
-    """Run one service; an unexpected exception becomes None (= unavailable).
+    """Run one service; a timeout or an unexpected exception becomes None.
 
-    Services already return None on network failures. This guard is for bugs
-    or unforeseen API shapes: one broken source must not sink the whole
-    assessment, and the engine already knows how to handle "unavailable".
+    Services already return None on network failures. This guard adds:
+      - a per-source time limit (SOURCE_TIMEOUT)
+      - a net for bugs or unforeseen API shapes
+    One slow or broken source must not sink the whole assessment, and the
+    engine already knows how to handle "unavailable".
     """
     try:
-        return await coro
+        # wait_for cancels the service call if it runs past the limit
+        return await asyncio.wait_for(coro, timeout=SOURCE_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning("Assessment: source '%s' exceeded %ds, treated as unavailable",
+                       name, SOURCE_TIMEOUT)
+        return None
     except Exception:
         # logger.exception logs the full traceback: the bug stays visible
         logger.exception("Assessment: source '%s' raised, treated as unavailable", name)
