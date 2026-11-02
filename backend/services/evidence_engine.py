@@ -17,7 +17,9 @@ Every score is built the same way:
 
 import logging
 
-from backend.schemas.evidence import EvidenceGap, EvidenceScore
+from datetime import date
+
+from backend.schemas.evidence import EvidenceGap, EvidenceScore, LiteratureTrend
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,44 @@ CONFIG = {
             "trials_mention_only": 0.1,  # ClinicalTrials mentions, no drug on the target
             "nothing": 0.0,
         },
+    },
+    "biological_knowledge": {
+        # This axis measures how well the biology is characterised. It is NOT
+        # "higher is better": a high score also means a crowded field. The
+        # literature trend (Emerging / Growing / Stable / Declining) gives the
+        # other half of the picture.
+        # Weighted mean of sub-scores (weights sum to 1); a sub-score whose
+        # source failed is left out and the weights are renormalised.
+        "weights": {"literature": 0.5, "pathways": 0.2, "interactions": 0.15, "function": 0.15},
+        # PubMed all-time count -> literature sub-score
+        "literature_tiers": [(5000, 1.0), (1000, 0.75), (200, 0.5), (20, 0.25), (1, 0.1)],
+        "pathway_tiers": [(5, 1.0), (1, 0.5)],
+        # STRING partners above this combined score count as high confidence
+        "partner_min_score": 0.9,
+        "partner_tiers": [(5, 1.0), (1, 0.5)],
+        # below this score the biology is considered poorly characterised (gap)
+        "gap_below": 0.25,
+    },
+    "literature_trend": {
+        "window_years": 5,  # compare the last 5 complete years with the 5 before
+        "growing_ratio": 1.5,  # recent / previous >= 1.5 -> Growing
+        "declining_ratio": 0.8,  # recent / previous < 0.8 -> Declining
+        "emerging_max_previous": 50,  # growing from almost nothing -> Emerging
+    },
+    "animal_models": {
+        "tiers": {
+            "relevant_strong": 1.0,  # mouse phenotype mapped to the disease, strong (OT animal_model)
+            "relevant_some": 0.7,  # mouse phenotype mapped to the disease, weaker
+            "well_characterised": 0.6,  # many mouse phenotypes, none mapped to the disease
+            "some_phenotypes": 0.4,
+            "nothing": 0.0,
+        },
+        "relevant_strong_min": 0.5,  # OT animal_model score for "relevant_strong"
+        "well_characterised_min": 20,  # distinct MP terms
+    },
+    "disease_expression": {
+        # Open Targets rna_expression (Expression Atlas: disease vs normal) -> score
+        "tiers": [(0.5, 1.0), (0.2, 0.6), (0.0001, 0.3)],
     },
 }
 
@@ -508,4 +548,317 @@ def score_clinical_precedence(
         ))
 
     return EvidenceScore(dimension="clinical_precedence", score=score, label=label_for(score),
+                         explanation=explanation, facts=facts, sources=sources), gaps
+
+
+def _tiered(value: float | int | None, tiers: list[tuple[float, float]]) -> float:
+    """First (threshold, score) whose threshold is reached; 0.0 if none."""
+    if value is None:
+        return 0.0
+    for threshold, score in tiers:
+        if value >= threshold:
+            return score
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Literature trend (shown next to the knowledge axis, not a score)
+# ---------------------------------------------------------------------------
+def literature_trend(pubmed: dict | None, europe_pmc: dict | None) -> LiteratureTrend:
+    """Publication volume (PubMed) and direction (Europe PMC timeline).
+
+    Compares the last `window_years` COMPLETE years with the window before.
+    The current year is excluded: it is still being indexed and would make
+    every target look like it is declining.
+    """
+    cfg = CONFIG["literature_trend"]
+    trend = LiteratureTrend(
+        total_count=(pubmed or {}).get("total_count"),
+        recent_count=(pubmed or {}).get("recent_count"),
+    )
+    timeline = (europe_pmc or {}).get("timeline")
+    if not timeline:
+        return trend
+    trend.timeline = timeline
+
+    last = date.today().year - 1  # last complete year
+    w = cfg["window_years"]
+    recent_years = [str(y) for y in range(last - w + 1, last + 1)]
+    previous_years = [str(y) for y in range(last - 2 * w + 1, last - w + 1)]
+    values = [timeline.get(y) for y in recent_years + previous_years]
+    if any(v is None for v in values):
+        return trend  # a failed year in the windows: no trend rather than a wrong one
+
+    recent = sum(timeline[y] for y in recent_years)
+    previous = sum(timeline[y] for y in previous_years)
+
+    if recent == 0 and previous == 0:
+        trend.trend = "Unknown"
+    elif previous == 0 or (
+        recent / previous >= cfg["growing_ratio"] and previous <= cfg["emerging_max_previous"]
+    ):
+        trend.trend = "Emerging"
+    elif recent / previous >= cfg["growing_ratio"]:
+        trend.trend = "Growing"
+    elif recent / previous < cfg["declining_ratio"]:
+        trend.trend = "Declining"
+    else:
+        trend.trend = "Stable"
+    return trend
+
+
+# ---------------------------------------------------------------------------
+# Dimension: biological knowledge
+# ---------------------------------------------------------------------------
+def score_biological_knowledge(
+    pubmed: dict | None,
+    reactome: dict | None,
+    string: dict | None,
+    uniprot: dict | None,
+) -> tuple[EvidenceScore, list[EvidenceGap]]:
+    """How well is the target's biology characterised?
+
+    Unlike the other axes, this one is built as a weighted mean of four
+    sub-scores, because "knowledge" is breadth across independent sources
+    rather than a single ladder:
+      - literature volume (PubMed, all time)
+      - curated pathways (Reactome)
+      - high-confidence interaction partners (STRING)
+      - curated function text (UniProt)
+    A sub-score whose source failed is excluded (weights renormalised).
+    """
+    cfg = CONFIG["biological_knowledge"]
+    facts: list[str] = []
+    sources: list[str] = []
+    parts: dict[str, float] = {}
+
+    total = (pubmed or {}).get("total_count")
+    if total is not None:
+        sources.append("PubMed")
+        parts["literature"] = _tiered(total, cfg["literature_tiers"])
+        recent = pubmed.get("recent_count")
+        facts.append(
+            f"{_fmt(total)} publications, {_fmt(recent)} in {pubmed.get('recent_window')} (PubMed)"
+        )
+
+    pathways = (reactome or {}).get("pathways")
+    if pathways is not None:
+        sources.append("Reactome")
+        parts["pathways"] = _tiered(len(pathways), cfg["pathway_tiers"])
+        names = [p["name"] for p in pathways[:3]]
+        facts.append(
+            f"{_plural(len(pathways), 'Reactome pathway')}"
+            + (f", e.g. {', '.join(names)}" if names else "")
+        )
+
+    interactions = (string or {}).get("interactions")
+    if interactions is not None:
+        sources.append("STRING")
+        strong = [i for i in interactions if (i.get("score") or 0) >= cfg["partner_min_score"]]
+        parts["interactions"] = _tiered(len(strong), cfg["partner_tiers"])
+        facts.append(
+            f"{_plural(len(strong), 'high-confidence partner')} (STRING >= "
+            f"{cfg['partner_min_score']})"
+            + (f": {', '.join(i['partner'] for i in strong[:5])}" if strong else "")
+        )
+
+    # uniprot.py returns {} on failure: an empty dict means "unknown"
+    if uniprot:
+        sources.append("UniProt")
+        has_function = bool(uniprot.get("function"))
+        parts["function"] = 1.0 if has_function else 0.0
+        facts.append("Curated function in UniProt" if has_function else "No curated function in UniProt")
+
+    if not parts:
+        return EvidenceScore(dimension="biological_knowledge", score=None, label="Unavailable",
+                             explanation="No literature or pathway source could be reached."), []
+
+    weight_sum = sum(cfg["weights"][k] for k in parts)
+    score = round(sum(cfg["weights"][k] * v for k, v in parts.items()) / weight_sum, 2)
+
+    if score >= 0.8:
+        explanation = "Well-characterised biology (also a crowded field)."
+    elif score >= 0.5:
+        explanation = "Reasonably characterised biology."
+    else:
+        explanation = "Poorly characterised biology: higher novelty, higher uncertainty."
+    if len(parts) < len(cfg["weights"]):
+        missing = sorted(set(cfg["weights"]) - set(parts))
+        explanation += f" (Missing: {', '.join(missing)}.)"
+
+    gaps = []
+    if score < cfg["gap_below"] and "literature" in parts:
+        gaps.append(EvidenceGap(
+            dimension="biological_knowledge",
+            description="Target biology poorly characterised",
+            severity="low",
+            why_it_matters=(
+                "Little is known about function, pathways or partners: the "
+                "mechanism linking the target to disease will need to be built "
+                "experimentally (higher risk, but also less competition)."
+            ),
+        ))
+
+    return EvidenceScore(dimension="biological_knowledge", score=score, label=label_for(score),
+                         explanation=explanation, facts=facts, sources=sources), gaps
+
+
+# ---------------------------------------------------------------------------
+# Dimension: animal models
+# ---------------------------------------------------------------------------
+def score_animal_models(
+    mgi: dict | None, open_targets: dict | None
+) -> tuple[EvidenceScore, list[EvidenceGap]]:
+    """What does genetic perturbation of the mouse ortholog show?
+
+    Sources:
+      - Open Targets animal_model datatype: mouse phenotypes mapped to the disease
+        (on the indication if chosen, else across all diseases)
+      - MGI: all phenotypes of the mouse ortholog
+
+    Lethality is NOT scored here: it is a safety signal (see safety section).
+    Caveat carried in the facts: MGI pools every allele (knockouts,
+    conditional, activating knock-ins such as Kras G12D).
+    """
+    cfg = CONFIG["animal_models"]
+    tiers = cfg["tiers"]
+    facts: list[str] = []
+    sources: list[str] = []
+    mgi_ok = _is_available(mgi)
+    ot_ok = _is_available(open_targets)
+
+    if not mgi_ok and not ot_ok:
+        return EvidenceScore(dimension="animal_models", score=None, label="Unavailable",
+                             explanation="MGI and Open Targets could not be reached."), []
+
+    # --- Open Targets: phenotypes relevant to the disease -----------------------
+    relevant, holder = 0.0, None
+    indication = (open_targets or {}).get("indication") if ot_ok else None
+    if ot_ok:
+        sources.append("Open Targets")
+        rows = (_indication_associations(open_targets) if indication
+                else open_targets.get("top_associations"))
+        relevant, holder = _best_datatype(rows, ["animal_model"])
+        if holder:
+            facts.append(f"Mouse model evidence for {holder['disease_name']} ({relevant:.2f}) (Open Targets)")
+        elif indication:
+            facts.append(f"No mouse model evidence for {indication['disease_name']} (Open Targets)")
+
+    # --- MGI: breadth of mouse phenotypes ----------------------------------------
+    count = None
+    if mgi_ok:
+        sources.append("MGI")
+        mouse = mgi.get("mouse_gene") or {}
+        if mgi.get("found") is False:
+            facts.append("No mouse ortholog (MGI)")
+        else:
+            count = mgi.get("phenotype_count")
+            top = [p["term"] for p in (mgi.get("top_phenotypes") or [])[:3]]
+            facts.append(
+                f"{_plural(count or 0, 'phenotype')} for {mouse.get('symbol')} (MGI)"
+                + (f", e.g. {', '.join(top)}" if top else "")
+            )
+            facts.append("MGI phenotypes pool all alleles (knockouts, conditional, activating knock-ins)")
+
+    # --- Score ---------------------------------------------------------------
+    if relevant >= cfg["relevant_strong_min"]:
+        tier, explanation = "relevant_strong", "Mouse models reproduce disease-relevant phenotypes."
+    elif relevant > 0:
+        tier, explanation = "relevant_some", "Some disease-relevant mouse model evidence."
+    elif (count or 0) >= cfg["well_characterised_min"]:
+        tier, explanation = "well_characterised", "Well-characterised mouse genetics, not mapped to the disease."
+    elif (count or 0) > 0:
+        tier, explanation = "some_phenotypes", "Some mouse phenotypes, not mapped to the disease."
+    else:
+        tier, explanation = "nothing", "No characterised mouse model."
+    score = tiers[tier]
+
+    gaps = []
+    if mgi_ok and score == 0.0:
+        gaps.append(EvidenceGap(
+            dimension="animal_models",
+            description="No characterised mouse model",
+            severity="medium",
+            why_it_matters=(
+                "Without an in vivo genetic model, both the efficacy hypothesis and "
+                "the consequences of losing the target remain untested in a mammal."
+            ),
+        ))
+
+    return EvidenceScore(dimension="animal_models", score=score, label=label_for(score),
+                         explanation=explanation, facts=facts, sources=sources), gaps
+
+
+# ---------------------------------------------------------------------------
+# Dimension: disease expression
+# ---------------------------------------------------------------------------
+def score_disease_expression(
+    open_targets: dict | None, hpa: dict | None
+) -> tuple[EvidenceScore, list[EvidenceGap]]:
+    """Is the target expressed / deregulated in the chosen indication?
+
+    Sources:
+      - Open Targets rna_expression: differential expression, disease vs normal
+        (Expression Atlas). Drives the score.
+      - HPA cancer expression (TCGA): context only. HPA uses the median per
+        cancer type, so it misses biomarker-defined subgroups (e.g. HER2+).
+
+    Needs an indication: without one there is no disease to compare against,
+    so the axis is reported as not assessed (score None), which is not a gap.
+    """
+    cfg = CONFIG["disease_expression"]
+    facts: list[str] = []
+    sources: list[str] = []
+    ot_ok = _is_available(open_targets)
+    indication = (open_targets or {}).get("indication") if ot_ok else None
+
+    # HPA cancer context: only relevant without an indication or for an
+    # oncology one (showing tumour expression for arthritis would mislead)
+    areas = (indication or {}).get("therapeutic_areas") or []
+    oncology = not indication or any("cancer" in a.lower() for a in areas)
+    cancer = (hpa or {}).get("cancer_expression") or {}
+    if oncology and cancer.get("specificity"):
+        sources.append("HPA")
+        line = f"Across cancers: {cancer['specificity']}, {cancer.get('distribution')} (HPA, TCGA medians)"
+        if cancer.get("specific_expression"):
+            enriched = ", ".join(cancer["specific_expression"])
+            line += f"; enriched in {enriched}"
+        facts.append(line)
+
+    if not ot_ok:
+        return EvidenceScore(dimension="disease_expression", score=None, label="Unavailable",
+                             explanation="Open Targets could not be reached.",
+                             facts=facts, sources=sources), []
+    if not indication:
+        return EvidenceScore(dimension="disease_expression", score=None, label="Unavailable",
+                             explanation="Choose an indication to assess expression in disease.",
+                             facts=facts, sources=sources), []
+
+    sources.insert(0, "Open Targets")
+    best, holder = _best_datatype(_indication_associations(open_targets), ["rna_expression"])
+    if holder:
+        facts.insert(0, f"Differential expression in {holder['disease_name']} ({best:.2f}) "
+                        "(Open Targets / Expression Atlas)")
+        score = _tiered(best, cfg["tiers"])
+        explanation = "Target deregulated in the indication (disease vs normal)."
+    else:
+        facts.insert(0, f"No differential expression data for {indication['disease_name']} (Open Targets)")
+        score = 0.0
+        explanation = ("No differential expression evidence in the indication. "
+                       "Such data are sparse outside oncology: absence is weak evidence.")
+
+    gaps = []
+    if score == 0.0:
+        gaps.append(EvidenceGap(
+            dimension="disease_expression",
+            description=f"No evidence of target deregulation in {indication['disease_name']}",
+            severity="low",
+            why_it_matters=(
+                "Expression in the diseased tissue supports biological relevance and, "
+                "for antibodies or ADCs, is a prerequisite. Here it should be checked "
+                "experimentally (patient samples, IHC)."
+            ),
+        ))
+
+    return EvidenceScore(dimension="disease_expression", score=score, label=label_for(score),
                          explanation=explanation, facts=facts, sources=sources), gaps
