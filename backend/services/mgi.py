@@ -13,7 +13,9 @@ Flow:
   2. all phenotype annotations of that mouse gene
 """
 
+import asyncio
 import logging
+from collections import Counter
 
 from backend.utils.http_client import ALLIANCE_BASE_URL, get_json
 from backend.utils.provenance import make_provenance
@@ -26,6 +28,7 @@ MGI_PHENOTYPE_URL = "https://www.informatics.jax.org/allele/summary?markerId={mg
 
 # One page is enough: the most studied genes have ~300 phenotypes (Trp53: 304)
 PHENOTYPE_PAGE_SIZE = 1000
+MODEL_PAGE_SIZE = 1000  # mouse genotypes (Kras: ~380)
 TOP_PHENOTYPES = 25  # best-documented phenotypes kept in the output
 MAX_PMIDS = 5  # references kept per phenotype
 
@@ -103,6 +106,26 @@ def _parse_phenotypes(records: list[dict]) -> list[dict]:
     return phenotypes
 
 
+def _parse_disease_models(records: list[dict]) -> list[dict]:
+    """Diseases that mouse genotypes of the gene are annotated to model.
+
+    Alliance gives one record per genotype (e.g. the KPC mouse) with
+    diseaseModels entries; names are Disease Ontology terms
+    ("pancreatic ductal adenocarcinoma"). Only positive annotations count:
+    "does not model ..." entries are explicit negatives.
+    """
+    counts: Counter = Counter()
+    for record in records:
+        # set(): a genotype counts once per disease
+        names = {
+            dm.get("diseaseModel")
+            for dm in record.get("diseaseModels") or []
+            if dm.get("associationType") == "IS_MODEL_OF" and dm.get("diseaseModel")
+        }
+        counts.update(names)
+    return [{"disease": name, "model_count": n} for name, n in counts.most_common()]
+
+
 def _empty_result(hgnc_id: str | None, found: bool | None) -> dict:
     """found=False: no mouse ortholog. found=None: Alliance unreachable or no HGNC id."""
     zero = 0 if found is False else None
@@ -115,6 +138,7 @@ def _empty_result(hgnc_id: str | None, found: bool | None) -> dict:
         "has_lethality": None if found is None else False,
         "lethality_phenotypes": empty,
         "top_phenotypes": empty,
+        "disease_models": empty,
         "truncated": False,
         "provenance": None,
     }
@@ -139,6 +163,8 @@ async def fetch_mgi(hgnc_id: str | None) -> dict:
             - lethality_phenotypes (list[dict] | None): MP terms containing "lethal"
             - top_phenotypes (list[dict] | None): TOP_PHENOTYPES best-documented
               terms (mp_id, term, reference_count, pmids)
+            - disease_models (list[dict] | None): diseases modelled by mouse
+              genotypes of the gene (disease, model_count), Disease Ontology names
             - truncated (bool): True if Alliance had more records than one page
             - provenance (Provenance | None)
         Phenotypes pool every MGI allele (null knockouts, conditional alleles,
@@ -170,11 +196,19 @@ async def fetch_mgi(hgnc_id: str | None) -> dict:
     mgi_id = mouse_gene["mgi_id"]
     mouse_gene["url"] = MGI_GENE_URL.format(mgi_id=mgi_id)
 
-    # Step 2: phenotypes of the mouse gene (depends on step 1 -> sequential)
-    data = await get_json(
-        f"{ALLIANCE_BASE_URL}/gene/{mgi_id}/phenotypes",
-        params={"limit": PHENOTYPE_PAGE_SIZE},
-        source="Alliance",
+    # Step 2: phenotypes and disease models of the mouse gene. They depend on
+    # step 1 (sequential) but not on each other (parallel).
+    data, models = await asyncio.gather(
+        get_json(
+            f"{ALLIANCE_BASE_URL}/gene/{mgi_id}/phenotypes",
+            params={"limit": PHENOTYPE_PAGE_SIZE},
+            source="Alliance",
+        ),
+        get_json(
+            f"{ALLIANCE_BASE_URL}/gene/{mgi_id}/models",
+            params={"limit": MODEL_PAGE_SIZE},
+            source="Alliance",
+        ),
     )
 
     if data is None:
@@ -204,6 +238,8 @@ async def fetch_mgi(hgnc_id: str | None) -> dict:
         "has_lethality": bool(lethality),
         "lethality_phenotypes": lethality,
         "top_phenotypes": phenotypes[:TOP_PHENOTYPES],
+        # None if the models request failed (phenotypes are still usable)
+        "disease_models": None if models is None else _parse_disease_models(models.get("results") or []),
         "truncated": truncated,
         "provenance": make_provenance(
             source="MGI (via Alliance of Genome Resources)",
