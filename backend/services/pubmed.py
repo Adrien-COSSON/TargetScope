@@ -1,40 +1,18 @@
 # backend/services/pubmed.py
+"""PubMed service: publication counts used as a research-maturity indicator.
+
+Only esearch with retmax=0 is used: we need counts, not article content.
+"""
 
 import asyncio
 import logging
 from datetime import date
 
-from backend.config import settings
-from backend.utils.http_client import get_json, PUBMED_BASE_URL
+from backend.utils.ncbi import ESEARCH_URL, extract_count, ncbi_get, ncbi_params
 
 logger = logging.getLogger(__name__)
 
-ESEARCH_URL = f"{PUBMED_BASE_URL}/esearch.fcgi"
-RECENT_YEARS = 5
-NCBI_TOOL = "TargetScope"
-
-
-def _base_params(gene_name: str) -> dict:
-    """Build the esearch parameters shared by both calls."""
-    params = {
-        "db": "pubmed",
-        "term": f"{gene_name}[Title/Abstract]",
-        "retmax": 0,
-        "retmode": "json",
-        "tool": NCBI_TOOL,
-    }
-    if settings.contact_email:
-        params["email"] = settings.contact_email
-    if settings.pubmed_api_key:
-        params["api_key"] = settings.pubmed_api_key
-    return params
-
-
-def _extract_count(data: dict | None) -> int | None:
-    """Return the hit count from an esearch response, None if the request failed."""
-    if data is None:
-        return None
-    return int(data.get("esearchresult", {}).get("count", 0))
+RECENT_YEARS = 5  # size of the "recent activity" window, current year included
 
 
 async def fetch_pubmed(gene_name: str) -> dict:
@@ -58,27 +36,40 @@ async def fetch_pubmed(gene_name: str) -> dict:
     logger.info("PubMed: fetch_pubmed started for '%s'", gene_name)
 
     current_year = date.today().year
-    start_year = current_year - RECENT_YEARS + 1
+    start_year = current_year - RECENT_YEARS + 1  # +1: the current year counts as one
 
-    total_params = _base_params(gene_name)
-    recent_params = {
-        **_base_params(gene_name),
-        "datetype": "pdat",
-        "mindate": str(start_year),
-        "maxdate": str(current_year),
-    }
+    # [Title/Abstract] avoids matches on MeSH terms or affiliations only
+    term = f"{gene_name}[Title/Abstract]"
 
+    total_params = ncbi_params("pubmed", term=term, retmax=0)
+    # datetype=pdat: filter on publication date (not entry date in PubMed)
+    recent_params = ncbi_params(
+        "pubmed",
+        term=term,
+        retmax=0,
+        datetype="pdat",
+        mindate=str(start_year),
+        maxdate=str(current_year),
+    )
+
+    # Both calls go through the shared NCBI throttle, so running them
+    # in parallel cannot exceed the rate limit.
     total_data, recent_data = await asyncio.gather(
-        get_json(ESEARCH_URL, params=total_params, source="PubMed"),
-        get_json(ESEARCH_URL, params=recent_params, source="PubMed"),
+        ncbi_get(ESEARCH_URL, total_params, source="PubMed"),
+        ncbi_get(ESEARCH_URL, recent_params, source="PubMed"),
     )
 
     result = {
         "gene_name": gene_name,
-        "total_count": _extract_count(total_data),
-        "recent_count": _extract_count(recent_data),
+        "total_count": extract_count(total_data),
+        "recent_count": extract_count(recent_data),
         "recent_window": f"{start_year}-{current_year}",
     }
 
-    logger.info("PubMed: fetch_pubmed ended for '%s'", gene_name)
+    logger.info(
+        "PubMed: fetch_pubmed ended for '%s' (total=%s, recent=%s)",
+        gene_name,
+        result["total_count"],
+        result["recent_count"],
+    )
     return result
