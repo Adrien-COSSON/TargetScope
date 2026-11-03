@@ -1,6 +1,7 @@
 import logging
- 
-from backend.utils.http_client import HPA_BASE_URL, get_json
+import xml.etree.ElementTree as ET
+
+from backend.utils.http_client import HPA_BASE_URL, get_bytes, get_json
 from backend.utils.provenance import make_provenance
  
 logger = logging.getLogger(__name__)
@@ -144,3 +145,125 @@ async def fetch_hpa(ensembl_id: str) -> dict:
                 localization["main"])
     
     return result
+
+
+# ---------------------------------------------------------------------------
+# Full expression profiles (per-gene XML)
+# ---------------------------------------------------------------------------
+# The JSON above only lists the tissues where the gene is ENRICHED. The
+# per-gene XML holds the complete profiles, checked with scripts/explore_v1.py:
+#   - rnaExpression assayType="consensusTissue": 51 tissues, nTPM (HPA + GTEx)
+#   - rnaExpression assayType="immuneCell": 19 blood cell types, nTPM
+#   - cellTypeExpression (scRNAseq): ~150 single cell types, nCPM
+GENE_PAGE_URL = "https://www.proteinatlas.org/{ensembl_id}"
+
+
+def _float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalized_level(data: ET.Element) -> float | None:
+    """The nTPM value of one <data> row (HPA also gives pTPM and raw TPM)."""
+    for level in data.findall("level"):
+        if level.get("type") == "normalizedRNAExpression":
+            return _float(level.get("expRNA"))
+    return None
+
+
+def _rna_block(root: ET.Element, assay_type: str) -> ET.Element | None:
+    return next((el for el in root.iter("rnaExpression") if el.get("assayType") == assay_type), None)
+
+
+def _parse_tissues(root: ET.Element) -> list[dict]:
+    """Consensus tissue profile: [{"tissue", "organ", "ntpm"}], highest first."""
+    block = _rna_block(root, "consensusTissue")
+    rows = []
+    for data in block.findall("data") if block is not None else []:
+        tissue = data.find("tissue")
+        value = _normalized_level(data)
+        if tissue is not None and value is not None:
+            rows.append({"tissue": (tissue.text or "").strip(), "organ": tissue.get("organ"),
+                         "ntpm": value})
+    return sorted(rows, key=lambda r: -r["ntpm"])
+
+
+def _parse_immune_cells(root: ET.Element) -> list[dict]:
+    """Blood immune cell profile: [{"cell", "lineage", "ntpm"}], highest first."""
+    block = _rna_block(root, "immuneCell")
+    rows = []
+    for data in block.findall("data") if block is not None else []:
+        cell = data.find("immuneCell")
+        value = _normalized_level(data)
+        if cell is not None and value is not None:
+            rows.append({"cell": (cell.text or "").strip(), "lineage": cell.get("lineage"),
+                         "ntpm": value})
+    return sorted(rows, key=lambda r: -r["ntpm"])
+
+
+def _parse_single_cells(root: ET.Element) -> dict:
+    """Single cell type profile (scRNAseq, nCPM) and its specificity category."""
+    block = next(root.iter("cellTypeExpression"), None)
+    if block is None:
+        return {"specificity": None, "cells": []}
+    specificity = block.find("cellTypeSpecificity")
+    cells = [
+        {"cell": el.get("name"), "ncpm": _float(el.get("expRNA"))}
+        for el in block.findall("singleCellTypeExpression")
+        if el.get("name") and _float(el.get("expRNA")) is not None
+    ]
+    return {"specificity": specificity.get("category") if specificity is not None else None,
+            "cells": sorted(cells, key=lambda c: -c["ncpm"])}
+
+
+def _parse_protein_classes(root: ET.Element) -> list[str]:
+    """HPA protein classes, e.g. ["Transporters", "Cancer-related genes"]."""
+    names = []
+    for el in root.iter("proteinClass"):
+        name = el.get("name") or (el.text or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _parse_antibodies(root: ET.Element) -> list[str]:
+    """Ids of the HPA antibodies against the protein (validated reagents)."""
+    ids = []
+    for el in root.iter("antibody"):
+        antibody_id = el.get("id")
+        if antibody_id and antibody_id not in ids:
+            ids.append(antibody_id)
+    return ids
+
+
+def parse_hpa_xml(content: bytes) -> dict:
+    """Pure parser of the HPA per-gene XML (tested offline)."""
+    root = ET.fromstring(content)
+    return {"tissues": _parse_tissues(root),
+            "immune_cells": _parse_immune_cells(root),
+            "single_cells": _parse_single_cells(root),
+            "protein_classes": _parse_protein_classes(root),
+            "antibodies": _parse_antibodies(root)}
+
+
+async def fetch_hpa_profiles(ensembl_id: str | None) -> dict:
+    """Complete RNA profiles (tissues, immune cells, single cell types).
+
+    found=None when HPA could not be reached or the XML is not parseable.
+    """
+    if not ensembl_id:
+        return {"found": None}
+    content = await get_bytes(f"{HPA_BASE_URL}/{ensembl_id}.xml", source="HPA")
+    if content is None:
+        return {"found": None}
+    try:
+        profiles = parse_hpa_xml(content)
+    except ET.ParseError:
+        logger.exception("HPA: XML for %s is not parseable", ensembl_id)
+        return {"found": None}
+    logger.info("HPA: profiles for %s: %d tissues, %d immune cells, %d single cell types",
+                ensembl_id, len(profiles["tissues"]), len(profiles["immune_cells"]),
+                len(profiles["single_cells"]["cells"]))
+    return {"found": True, **profiles, "url": GENE_PAGE_URL.format(ensembl_id=ensembl_id)}

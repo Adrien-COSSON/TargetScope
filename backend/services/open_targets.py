@@ -640,3 +640,94 @@ async def fetch_open_targets(
         len(result["safety_liabilities"]),
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Tool Box and Genetics extras
+# ---------------------------------------------------------------------------
+# Separate queries on purpose: in GraphQL one wrong field fails the WHOLE
+# query (HTTP 400). Keeping the extras apart means a schema change here can
+# never take down the main assessment query.
+PROBES_QUERY = """
+query Probes($ensemblId: String!) {
+  target(ensemblId: $ensemblId) {
+    chemicalProbes {
+      id drugId control isHighQuality mechanismOfAction origin
+      probesDrugsScore scoreInCells scoreInOrganisms
+      urls { niceName url }
+    }
+  }
+}
+"""
+
+CLASS_QUERY = """
+query TargetClass($ensemblId: String!) {
+  target(ensemblId: $ensemblId) {
+    isEssential
+    targetClass { id label level }
+  }
+}
+"""
+
+MUTATION_LANDSCAPE_SIZE = 6  # cancers with somatic evidence, queried for frequencies
+
+
+def _parse_probes(items: list[dict] | None) -> list[dict]:
+    """Chemical probes, high-quality ones first (Probes & Drugs / SGC / Chemical Probes Portal)."""
+    probes = []
+    for p in items or []:
+        probes.append({
+            "name": p.get("id"),
+            "chembl_id": p.get("drugId"),
+            "control": p.get("control"),  # inactive analogue, essential for clean experiments
+            "high_quality": bool(p.get("isHighQuality")),
+            "mechanism": ", ".join(p.get("mechanismOfAction") or []) or None,
+            "origin": ", ".join(p.get("origin") or []) or None,
+            "score_in_cells": p.get("scoreInCells"),
+            "score_in_organisms": p.get("scoreInOrganisms"),
+            "probes_drugs_score": p.get("probesDrugsScore"),
+            "urls": [{"name": u.get("niceName"), "url": u.get("url")} for u in p.get("urls") or []],
+        })
+    return sorted(probes, key=lambda p: (not p["high_quality"], -(p["probes_drugs_score"] or 0)))
+
+
+async def fetch_ot_extras(ensembl_id: str | None) -> dict:
+    """Chemical probes, target class and core essentiality (two small queries)."""
+    if not ensembl_id:
+        return {"found": None}
+    probes_data, class_data = await asyncio.gather(
+        _graphql(PROBES_QUERY, {"ensemblId": ensembl_id}),
+        _graphql(CLASS_QUERY, {"ensemblId": ensembl_id}),
+    )
+    probes_target = (probes_data or {}).get("target") or {}
+    class_target = (class_data or {}).get("target") or {}
+    return {
+        "found": True if (probes_data is not None or class_data is not None) else None,
+        # None = that query failed: unknown, not "no probe"
+        "chemical_probes": _parse_probes(probes_target.get("chemicalProbes"))
+        if probes_data is not None else None,
+        "target_class": [
+            {"label": c.get("label"), "level": c.get("level")}
+            for c in class_target.get("targetClass") or []
+        ] if class_data is not None else None,
+        "is_essential": class_target.get("isEssential") if class_data is not None else None,
+    }
+
+
+async def fetch_mutation_landscape(ensembl_id: str | None, associations: list[dict] | None) -> list[dict] | None:
+    """Somatic mutation frequency in the cancers where Open Targets has somatic evidence.
+
+    Feeds Genetics figure 2 ("how often is the target mutated, and where?").
+    Frequencies count samples with ANY mutation of the gene (Cancer Gene
+    Census): they do not separate a recurrent hotspot from scattered mutations.
+    """
+    if not ensembl_id or associations is None:
+        return None
+    cancers = [a for a in associations
+               if (a.get("datatype_scores") or {}).get("somatic_mutation")][:MUTATION_LANDSCAPE_SIZE]
+    results = await asyncio.gather(*(_mutation_frequency(ensembl_id, a["disease_id"]) for a in cancers))
+    landscape = [
+        {**r, "disease_id": a["disease_id"]}
+        for a, r in zip(cancers, results, strict=True) if r  # False (no data) and None (failed) skipped
+    ]
+    return sorted(landscape, key=lambda r: -r["frequency"])

@@ -8,6 +8,7 @@ Feeds two assessment dimensions:
 
 import asyncio
 import logging
+import re
 from collections import Counter
 
 from backend.utils.ncbi import (
@@ -68,6 +69,30 @@ def _condition_id(trait: dict) -> str | None:
     return None
 
 
+AA3 = {
+    "Ala": "A", "Arg": "R", "Asn": "N", "Asp": "D", "Cys": "C", "Gln": "Q", "Glu": "E",
+    "Gly": "G", "His": "H", "Ile": "I", "Leu": "L", "Lys": "K", "Met": "M", "Phe": "F",
+    "Pro": "P", "Ser": "S", "Thr": "T", "Trp": "W", "Tyr": "Y", "Val": "V", "Ter": "*",
+}  # fmt: skip
+P_DOT = re.compile(r"\(p\.([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2}|=|fs|\*)")
+
+
+def _protein_change(record: dict) -> str | None:
+    """Short protein notation as used in papers (E571K), or None (non-coding...).
+
+    esummary gives "protein_change" ("E571K, E554K": one per transcript, the
+    first is the canonical one); the HGVS title "(p.Glu571Lys)" is the fallback.
+    """
+    listed = (record.get("protein_change") or "").split(",")[0].strip()
+    if listed:
+        return listed
+    match = P_DOT.search(record.get("title") or "")
+    if not match:
+        return None
+    ref, pos, alt = match.groups()
+    return f"{AA3.get(ref, ref)}{pos}{AA3.get(alt, alt)}"
+
+
 def _parse_variant(uid: str, record: dict) -> dict:
     """Extract the fields TargetScope needs from one esummary record."""
     classification = record.get("germline_classification", {})
@@ -81,6 +106,7 @@ def _parse_variant(uid: str, record: dict) -> dict:
     return {
         "accession": record.get("accession"),
         "title": record.get("title"),
+        "protein_change": _protein_change(record),
         "classification": classification.get("description"),
         "review_status": classification.get("review_status"),
         "conditions": conditions,

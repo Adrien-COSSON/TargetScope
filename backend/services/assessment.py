@@ -16,14 +16,21 @@ import logging
 import time
 
 from backend.schemas.evidence import TargetAssessment
+from backend.services.alphafold import fetch_alphafold
 from backend.services.chembl import fetch_chembl
 from backend.services.clinicaltrials import count_trials
 from backend.services.clinvar import fetch_clinvar
+from backend.services.competition import fetch_landscape
 from backend.services.europe_pmc import publication_timeline
 from backend.services.evidence_engine import assess
-from backend.services.hpa import fetch_hpa
+from backend.services.gene_info import fetch_gene_info
+from backend.services.hpa import fetch_hpa, fetch_hpa_profiles
 from backend.services.mgi import fetch_mgi
-from backend.services.open_targets import fetch_open_targets
+from backend.services.open_targets import (
+    fetch_mutation_landscape,
+    fetch_open_targets,
+    fetch_ot_extras,
+)
 from backend.services.pubmed import fetch_pubmed
 from backend.services.reactome import fetch_reactome
 from backend.services.resolver import resolve_target
@@ -95,11 +102,29 @@ async def collect(target, indication_id: str | None = None) -> dict:
         "mgi": needs(target.hgnc_id, lambda: fetch_mgi(target.hgnc_id)),
         "hpa": needs(target.ensembl_id, lambda: fetch_hpa(target.ensembl_id)),
         "clinicaltrials": count_trials(gene),
+        # Identity card and Tool Box (context: they do not change the scores)
+        "gene_info": needs(target.entrez_id, lambda: fetch_gene_info(target.entrez_id)),
+        "alphafold": needs(target.uniprot_id, lambda: fetch_alphafold(target.uniprot_id)),
+        "hpa_profiles": needs(target.ensembl_id, lambda: fetch_hpa_profiles(target.ensembl_id)),
+        "ot_extras": needs(target.ensembl_id, lambda: fetch_ot_extras(target.ensembl_id)),
     }
 
     start = time.perf_counter()
     values = await asyncio.gather(*(_safe(name, coro) for name, coro in calls.items()))
     results = dict(zip(calls, values))
+
+    # Second wave: these need first-wave results (the drug list, the associations)
+    ot = results["open_targets"] or {}
+    indication = ot.get("indication") or {}
+    indication_names = [indication.get("disease_name"), *indication.get("synonyms", [])] if indication else None
+    competition, mutations = await asyncio.gather(
+        _safe("competition", fetch_landscape(results["chembl"], indication_names)),
+        _safe("mutation_landscape",
+              fetch_mutation_landscape(target.ensembl_id, ot.get("top_associations"))),
+    )
+    results["competition"] = competition
+    results["mutation_landscape"] = mutations
+
     logger.info("Assessment: %d sources collected for %s in %.1fs",
                 len(results), gene, time.perf_counter() - start)
 

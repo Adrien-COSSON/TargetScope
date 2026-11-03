@@ -1094,7 +1094,9 @@ def _source_status(name: str, result) -> SourceStatus:
 # Assembly
 # ---------------------------------------------------------------------------
 SOURCE_NAMES = ["open_targets", "chembl", "clinvar", "uniprot", "pubmed", "europe_pmc",
-                "reactome", "string", "mgi", "hpa", "clinicaltrials"]
+                "reactome", "string", "mgi", "hpa", "clinicaltrials",
+                # context sources: identity card, Tool Box, competition (no score)
+                "gene_info", "alphafold", "hpa_profiles", "ot_extras", "competition"]
 
 
 def assess(target: Target, results: dict) -> TargetAssessment:
