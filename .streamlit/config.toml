@@ -1,0 +1,14 @@
+# Streamlit theme for TargetScope (maquette B: warm paper, navy accent)
+[theme]
+base = "light"
+primaryColor = "#1D4E89"
+backgroundColor = "#FBFAF7"
+secondaryBackgroundColor = "#F2EFE8"
+textColor = "#1B1F24"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

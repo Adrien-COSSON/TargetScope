@@ -37,13 +37,20 @@ def test_collect_skips_sources_without_identifier(monkeypatch):
                      ("clinvar", "fetch_clinvar"), ("uniprot", "fetch_uniprot"),
                      ("pubmed", "fetch_pubmed"), ("europe_pmc", "publication_timeline"),
                      ("reactome", "fetch_reactome"), ("string", "fetch_string"),
-                     ("mgi", "fetch_mgi"), ("hpa", "fetch_hpa"), ("clinicaltrials", "count_trials")]:
+                     ("mgi", "fetch_mgi"), ("hpa", "fetch_hpa"), ("clinicaltrials", "count_trials"),
+                     ("gene_info", "fetch_gene_info"), ("alphafold", "fetch_alphafold"),
+                     ("hpa_profiles", "fetch_hpa_profiles"), ("ot_extras", "fetch_ot_extras"),
+                     ("competition", "fetch_landscape"),
+                     ("mutation_landscape", "fetch_mutation_landscape")]:
         monkeypatch.setattr(assessment, fn, fake(name, 7 if name == "clinicaltrials" else {"ok": name}))
 
     # No UniProt accession: ChEMBL, UniProt, Reactome and STRING are not called
     t = f.target("XYZ", ensembl_id="ENSG1", hgnc_id="HGNC:1")
     results = asyncio.run(assessment.collect(t))
+    # entrez_id is missing too: no gene_info. AlphaFold needs UniProt.
+    # competition and mutation_landscape are the second wave (always run)
     assert set(called) == {"open_targets", "clinvar", "pubmed", "europe_pmc", "mgi", "hpa",
-                           "clinicaltrials"}
+                           "clinicaltrials", "hpa_profiles", "ot_extras", "competition",
+                           "mutation_landscape"}
     assert results["chembl"] is None and results["reactome"] is None
     assert results["clinicaltrials"] == {"total": 7}

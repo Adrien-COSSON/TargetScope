@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from backend.schemas.evidence import TargetAssessment
 from backend.services.assessment import run_assessment
+from backend.services.evidence_engine import CONFIG, DIMENSIONS, ENGINE_VERSION
 from backend.services.open_targets import fetch_disease_options, search_diseases
 from backend.services.resolver import ResolutionUnavailableError, resolve_target
 
@@ -66,3 +67,13 @@ async def assess(request: AssessRequest) -> AssessResponse:
     except ResolutionUnavailableError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     return AssessResponse(assessment=assessment, raw=raw)
+
+
+@router.get("/engine/config")
+async def engine_config() -> dict:
+    """Thresholds and tiers of the evidence engine.
+
+    The frontend builds its "how to read this score" texts from them, so the
+    interface can never drift from the rules that actually produced the scores.
+    """
+    return {"engine_version": ENGINE_VERSION, "dimensions": DIMENSIONS, "config": CONFIG}

@@ -32,6 +32,7 @@ COSMIC_BASE_URL = (
 )
 # MGI has no stable public JSON API: its curated mouse data is served
 # by the Alliance of Genome Resources (checked with scripts/explore_mgi*.py)
+ALPHAFOLD_BASE_URL = "https://alphafold.ebi.ac.uk"
 ALLIANCE_BASE_URL = "https://www.alliancegenome.org/api"
 CLINICALTRIALS_BASE_URL = "https://clinicaltrials.gov/api/v2"
 REACTOME_BASE_URL = "https://reactome.org/ContentService"
@@ -99,7 +100,8 @@ async def _request_json(
     json_body: dict | None = None,
     source: str = "HTTP",
     not_found=None,
-) -> dict | list | None:
+    raw: bool = False,
+) -> dict | list | bytes | None:
     """Send a request and return its decoded JSON body, retrying only recoverable errors.
 
     Shared by get_json() and post_json() so every source gets the same behaviour.
@@ -120,6 +122,8 @@ async def _request_json(
         not_found: Value returned on HTTP 404, for APIs where 404 means
             "no data" rather than an error (e.g. Reactome: no pathway).
             Default None keeps 404 = failure.
+        raw (bool): return the body as bytes instead of decoding JSON
+            (e.g. the HPA per-gene XML).
 
     Returns:
         dict | list | None: Decoded JSON on success, None on failure.
@@ -149,6 +153,8 @@ async def _request_json(
             return None
         else:
             if response.is_success:
+                if raw:
+                    return response.content
                 try:
                     return response.json()
                 except ValueError:
@@ -196,6 +202,14 @@ async def get_json(
     return await _request_json(
         "GET", url, params=params, source=source, not_found=not_found
     )
+
+
+async def get_bytes(url: str, params: dict | None = None, source: str = "HTTP") -> bytes | None:
+    """GET a URL and return the raw body (None on failure), with the same retry rules.
+
+    For non-JSON sources, e.g. the Human Protein Atlas per-gene XML.
+    """
+    return await _request_json("GET", url, params=params, source=source, raw=True)
 
 
 async def post_json(

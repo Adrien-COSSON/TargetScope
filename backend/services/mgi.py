@@ -63,41 +63,85 @@ def _pick_mouse_ortholog(rows: list[dict]) -> dict | None:
         "symbol": (gene.get("geneSymbol") or {}).get("displayText"),
         # "high" / "moderate" / "low", as computed by Alliance
         "orthology_confidence": (best.get("confidence") or {}).get("name"),
-        "prediction_methods": [
-            m.get("name") for m in best.get("predictionMethodsMatched", [])
-        ],
+        "prediction_methods": [m.get("name") for m in best.get("predictionMethodsMatched", [])],
         "candidates": len(mouse),
     }
 
 
+MGI_REFERENCE_URL = "https://www.informatics.jax.org/reference/{ref_id}"
+
+
+def _pubmed_id(evidence: dict) -> str | None:
+    """PubMed id of an annotation's reference, or None.
+
+    Alliance gives each reference an AGRKB curie and lists its other ids in
+    crossReferences (PMID, DOI, PMCID, MGI); referenceID / pubModID hold the
+    main one. Many MGI references (often the oldest, or MGI's own curation
+    notes) have no PMID at all: Xpo1 has none.
+    """
+    ids = [x.get("referencedCurie") or "" for x in evidence.get("crossReferences") or []]
+    ids += [evidence.get("referenceID") or "", evidence.get("pubModID") or ""]
+    return next((i for i in ids if i.startswith("PMID:")), None)
+
+
+def _reference(evidence: dict) -> dict | None:
+    """One reference, whatever its id: {id, citation, url}.
+
+    The link goes to PubMed when there is a PMID, otherwise to the MGI
+    reference page (which itself links to the paper when there is one).
+    """
+    ids = [x.get("referencedCurie") or "" for x in evidence.get("crossReferences") or []]
+    ids += [evidence.get("referenceID") or "", evidence.get("pubModID") or ""]
+    pmid = _pubmed_id(evidence)
+    mgi_ref = next((i for i in ids if i.startswith("MGI:")), None)
+    doi = next((i for i in ids if i.startswith("DOI:")), None)
+    ref_id = pmid or mgi_ref or doi or evidence.get("curie") or next((i for i in ids if i), None)
+    if not ref_id:
+        return None
+    if pmid:
+        url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid.removeprefix('PMID:')}"
+    elif mgi_ref:
+        url = MGI_REFERENCE_URL.format(ref_id=mgi_ref)
+    elif doi:
+        url = f"https://doi.org/{doi.removeprefix('DOI:')}"
+    else:
+        url = None
+    return {"id": ref_id, "citation": evidence.get("shortCitation") or ref_id, "url": url}
+
+
 def _parse_phenotypes(records: list[dict]) -> list[dict]:
-    """One entry per MP term, with the PMIDs supporting it.
+    """One entry per MP term, with the references supporting it.
 
     The same term can be annotated several times (different alleles, papers),
-    so terms are merged and their references pooled.
+    so terms are merged and their references pooled. Every reference counts
+    (PubMed, MGI, DOI); "pmids" keeps the PubMed ones for the evidence engine.
     """
     terms: dict[str, dict] = {}
     for record in records:
         for annotation in record.get("primaryAnnotations", []):
-            pmid = (annotation.get("evidenceItem") or {}).get("referenceID")
+            evidence = annotation.get("evidenceItem") or {}
+            reference = _reference(evidence)
+            pmid = _pubmed_id(evidence)
             for term in annotation.get("phenotypeTerms", []):
                 curie = term.get("curie")
                 if not curie:
                     continue
                 entry = terms.setdefault(
-                    curie, {"mp_id": curie, "term": term.get("name"), "pmids": set()}
+                    curie, {"mp_id": curie, "term": term.get("name"), "pmids": set(), "refs": {}}
                 )
-                # referenceID can also be an MGI reference id: keep PubMed ones only
-                if pmid and pmid.startswith("PMID:"):
+                if pmid:
                     entry["pmids"].add(pmid)
+                if reference:
+                    entry["refs"].setdefault(reference["id"], reference)
 
     phenotypes = [
         {
             "mp_id": t["mp_id"],
             "term": t["term"],
-            "reference_count": len(t["pmids"]),
+            "reference_count": len(t["refs"]),
             # sorted() makes the output stable between runs (sets have no order)
             "pmids": sorted(t["pmids"])[:MAX_PMIDS],
+            "references": [t["refs"][k] for k in sorted(t["refs"])][:MAX_PMIDS],
         }
         for t in terms.values()
     ]
@@ -239,7 +283,9 @@ async def fetch_mgi(hgnc_id: str | None) -> dict:
         "lethality_phenotypes": lethality,
         "top_phenotypes": phenotypes[:TOP_PHENOTYPES],
         # None if the models request failed (phenotypes are still usable)
-        "disease_models": None if models is None else _parse_disease_models(models.get("results") or []),
+        "disease_models": None
+        if models is None
+        else _parse_disease_models(models.get("results") or []),
         "truncated": truncated,
         "provenance": make_provenance(
             source="MGI (via Alliance of Genome Resources)",
