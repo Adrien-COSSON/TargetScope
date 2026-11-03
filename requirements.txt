@@ -7,3 +7,7 @@ python-dotenv
 anthropic
 ruff
 pytest
+streamlit
+plotly
+fpdf2
+matplotlib

@@ -155,14 +155,19 @@ class TestMgi:
         picked = mgi._pick_mouse_ortholog(rows)
         assert (picked["mgi_id"], picked["candidates"]) == ("MGI:1", 2)
 
-    def test_phenotypes_merged_pubmed_only(self):
+    def test_phenotypes_merged_all_references_count(self):
         records = [phenotype_record("embryonic lethality", "MP:1", "PMID:1"),
                    phenotype_record("embryonic lethality", "MP:1", "PMID:2"),
                    phenotype_record("abnormal heart", "MP:2", "MGI:9")]
         parsed = mgi._parse_phenotypes(records)
-        assert parsed[0] == {"mp_id": "MP:1", "term": "embryonic lethality",
-                             "reference_count": 2, "pmids": ["PMID:1", "PMID:2"]}
-        assert parsed[1]["reference_count"] == 0
+        assert parsed[0]["term"] == "embryonic lethality"
+        assert parsed[0]["reference_count"] == 2
+        assert parsed[0]["pmids"] == ["PMID:1", "PMID:2"]
+        # an MGI-only reference counts, links to MGI, and is not a PMID
+        assert parsed[1]["reference_count"] == 1
+        assert parsed[1]["pmids"] == []
+        assert parsed[1]["references"][0]["url"] == (
+            "https://www.informatics.jax.org/reference/MGI:9")
 
     def test_disease_models_positive_only(self):
         records = [{"diseaseModels": [{"associationType": "IS_MODEL_OF", "diseaseModel": "PDAC"}]},

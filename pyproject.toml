@@ -10,5 +10,10 @@ extend-exclude = ["scripts"]  # throwaway exploration scripts, not shipped
 # I: import order / UP: modern Python syntax / B: likely bugs (bugbear)
 select = ["E", "W", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# The frontend builds HTML/CSS and user-facing sentences: wrapping them to
+# 100 columns would make the text harder to read and edit, not easier
+"frontend/**" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
